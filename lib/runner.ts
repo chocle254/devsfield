@@ -1,5 +1,6 @@
 import type { Asset, RunRecord, StepState } from "./types"
 import { STEP_DEFS, logsFor } from "./steps"
+import { buildScenes } from "./editor"
 import { saveRun, getRun } from "./store"
 import {
   appHost,
@@ -136,15 +137,19 @@ export async function runPipeline(id: string) {
     })
   }
 
+  const durationSec = 178
   finalRun.result = {
     videoUrl:
       "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
     posterUrl: `/demo-poster.png`,
-    durationSec: 178,
+    durationSec,
     title: `${full.split("/")[1]} — Demo`,
     summary: meta?.description ?? "An automated 3-minute demo of your deployed application.",
     scriptPreview: scriptText,
     assets,
+    scenes: buildScenes(scriptText, durationSec),
+    version: 1,
+    edits: [],
   }
   finalRun.status = "done"
   saveRun(finalRun)
