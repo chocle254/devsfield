@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { STEP_DEFS } from "@/lib/steps"
+import { STEP_DEFS, STEP_DEF_BY_ID } from "@/lib/steps"
 import type { StepState } from "@/lib/types"
 
 interface StreamPayload {
@@ -49,7 +49,7 @@ export function PipelineView({ id }: { id: string }) {
 
   const steps = data?.steps ?? STEP_DEFS.map((d) => ({ id: d.id, status: "pending" as const, logs: [], mode: "simulated" as const }))
   const doneCount = steps.filter((s) => s.status === "done").length
-  const progress = Math.round((doneCount / STEP_DEFS.length) * 100)
+  const progress = Math.round((doneCount / Math.max(steps.length, 1)) * 100)
   const isDone = data?.status === "done"
 
   return (
@@ -71,9 +71,15 @@ export function PipelineView({ id }: { id: string }) {
       </div>
 
       <ol className="relative">
-        {STEP_DEFS.map((def, i) => {
-          const state = steps[i]
-          const isLast = i === STEP_DEFS.length - 1
+        {steps.map((state, i) => {
+          const def = STEP_DEF_BY_ID[state.id] ?? {
+            id: state.id,
+            title: state.id,
+            description: "",
+            provider: "Devfields" as const,
+            duration: 0,
+          }
+          const isLast = i === steps.length - 1
           return (
             <li key={def.id} className="relative flex gap-4 pb-6 last:pb-0">
               {/* connector */}
