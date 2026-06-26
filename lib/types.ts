@@ -4,8 +4,27 @@ export type StepId =
   | "script"
   | "voiceover"
   | "capture"
+  | "presenter"
   | "compose"
   | "publish"
+
+export type VideoFormat = "demo" | "pitch_demo"
+
+export interface PresenterConfig {
+  /** show a small picture-in-picture presenter (Zoom-style) */
+  enabled: boolean
+  name?: string
+  /** uploaded photo as a data URL — animated as a talking head */
+  photoUrl?: string
+}
+
+export interface VideoOptions {
+  /** hard cap on the produced video length, in seconds (<= 300) */
+  maxDurationSec: number
+  /** demo walkthrough only, or an investor-style pitch followed by the demo */
+  format: VideoFormat
+  presenter: PresenterConfig
+}
 
 export type StepStatus = "pending" | "active" | "done" | "error"
 
@@ -91,6 +110,10 @@ export interface RunResult {
   version: number
   /** chat-style edit history */
   edits: EditMessage[]
+  /** video format that was produced */
+  format: VideoFormat
+  /** presenter overlay, present only when the user enabled it */
+  presenter?: PresenterConfig
 }
 
 export interface RunRecord {
@@ -100,6 +123,7 @@ export interface RunRecord {
   createdAt: number
   status: "running" | "done" | "error"
   steps: StepState[]
+  options: VideoOptions
   result?: RunResult
   error?: string
 }
@@ -107,4 +131,5 @@ export interface RunRecord {
 export interface RunInput {
   repoUrl: string
   appUrl: string
+  options: VideoOptions
 }

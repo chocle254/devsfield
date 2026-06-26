@@ -1,4 +1,4 @@
-import type { Asset, EditMessage, EditPatch, RunResult, Scene } from "./types"
+import type { Asset, EditMessage, EditPatch, RunResult, Scene, VideoFormat } from "./types"
 import { shortHash } from "./integrations"
 
 const sid = () => Math.random().toString(36).slice(2, 8)
@@ -7,7 +7,7 @@ const sid = () => Math.random().toString(36).slice(2, 8)
  * Split a narration script into timeline scenes. Real edits target a single
  * scene so the rest of the video is never re-rendered.
  */
-export function buildScenes(script: string, durationSec: number): Scene[] {
+export function buildScenes(script: string, durationSec: number, format: VideoFormat = "demo"): Scene[] {
   const paras = script
     .split(/\n{2,}/)
     .map((p) => p.trim())
@@ -17,8 +17,9 @@ export function buildScenes(script: string, durationSec: number): Scene[] {
 
   const titleFor = (text: string, i: number, total: number): string => {
     const t = text.toLowerCase()
-    if (i === 0) return "Intro"
+    if (i === 0) return format === "pitch_demo" ? "The pitch" : "Intro"
     if (i === total - 1) return "Closing"
+    if (/pitch|market|investor|now is the moment|who it's for/.test(t)) return "The pitch"
     if (/under the hood|architecture|built on|stack|engineering/.test(t)) return "How it works"
     if (/look|walkthrough|here's the|live app|interface|flow|watch/.test(t)) return "Live walkthrough"
     if (/problem|pain|struggle|hard|tedious/.test(t)) return "The problem"

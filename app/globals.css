@@ -122,3 +122,39 @@
     linear-gradient(to bottom, color-mix(in oklch, var(--border) 60%, transparent) 1px, transparent 1px);
   background-size: 40px 40px;
 }
+
+/* Presenter picture-in-picture: subtle "talking head" motion + speaking ring */
+@keyframes presenter-bob {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-2px) scale(1.012);
+  }
+}
+
+@keyframes presenter-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklch, var(--primary) 0%, transparent);
+  }
+}
+
+.presenter-bob {
+  animation: presenter-bob 2.4s ease-in-out infinite;
+}
+
+.presenter-ring {
+  animation: presenter-ring 1.6s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presenter-bob,
+  .presenter-ring {
+    animation: none;
+  }
+}

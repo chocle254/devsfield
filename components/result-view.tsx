@@ -85,7 +85,7 @@ export function ResultView({ id }: { id: string }) {
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-5 lg:gap-6">
       {/* Player + actions — mobile: 1st, desktop: top-left */}
       <div className="lg:col-span-3 lg:col-start-1 lg:row-start-1">
-        <div className="overflow-hidden rounded-xl border border-border bg-black">
+        <div className="relative overflow-hidden rounded-xl border border-border bg-black">
           <video
             key={r.videoUrl}
             controls
@@ -97,11 +97,15 @@ export function ResultView({ id }: { id: string }) {
             <source src={r.videoUrl} type="video/mp4" />
             Your browser does not support the video tag.
           </video>
+          {r.presenter?.enabled ? <PresenterCam presenter={r.presenter} /> : null}
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-primary/5 px-2.5 py-1 font-mono text-[11px] text-primary">
             v{r.version} · {fmt(r.durationSec)}
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 font-mono text-[11px] text-muted-foreground">
+            {r.format === "pitch_demo" ? "pitch + demo" : "demo"}
           </span>
           <a
             href={r.videoUrl}
@@ -153,6 +157,33 @@ export function ResultView({ id }: { id: string }) {
       <div className="lg:col-span-2 lg:col-start-4 lg:row-start-3">
         <ProvenanceCard result={r} id={id} />
       </div>
+    </div>
+  )
+}
+
+function PresenterCam({ presenter }: { presenter: NonNullable<RunResult["presenter"]> }) {
+  return (
+    <div className="pointer-events-none absolute bottom-3 right-3 flex flex-col items-center gap-1">
+      <div className="presenter-bob relative h-20 w-20 overflow-hidden rounded-full border-2 border-primary/80 bg-card shadow-lg sm:h-24 sm:w-24">
+        <span className="presenter-ring absolute inset-0 rounded-full" aria-hidden />
+        {presenter.photoUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={presenter.photoUrl || "/placeholder.svg"}
+            alt={presenter.name ? `${presenter.name}, presenting` : "Presenter"}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center font-mono text-xs text-muted-foreground">
+            {(presenter.name ?? "You").slice(0, 2).toUpperCase()}
+          </span>
+        )}
+      </div>
+      {presenter.name ? (
+        <span className="rounded bg-background/80 px-1.5 py-0.5 font-mono text-[10px] text-foreground backdrop-blur">
+          {presenter.name}
+        </span>
+      ) : null}
     </div>
   )
 }

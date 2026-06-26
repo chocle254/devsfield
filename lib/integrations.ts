@@ -92,8 +92,23 @@ export async function fetchRepoMeta(repoUrl: string): Promise<RepoMeta> {
 }
 
 // --- GMI Cloud (script writing) --------------------------------------------
-export async function writeScript(meta: RepoMeta, appUrl: string): Promise<string> {
-  const prompt = `Write a tight, energetic ~3 minute spoken demo-video narration script for the project "${meta.full}". Description: ${meta.description}. Stack: ${meta.language}. Live app: ${appUrl}. Structure it as three scenes: the problem, a live walkthrough, and how it works under the hood. Return only the narration text.`
+export interface ScriptOptions {
+  format: "demo" | "pitch_demo"
+  durationSec: number
+  presenterName?: string
+}
+
+export async function writeScript(meta: RepoMeta, appUrl: string, opts: ScriptOptions): Promise<string> {
+  const minutes = Math.max(1, Math.round(opts.durationSec / 60))
+  const wordBudget = Math.round((opts.durationSec / 60) * 145) // ~145 wpm natural delivery
+  const structure =
+    opts.format === "pitch_demo"
+      ? "Open with a short investor-style pitch (the problem, who it's for, why now), then transition into a live product walkthrough, and close with how it works under the hood."
+      : "Structure it as three scenes: the problem, a live walkthrough, and how it works under the hood."
+  const presenterLine = opts.presenterName
+    ? ` It will be delivered on-camera by ${opts.presenterName}, so write it in a natural first-person speaking voice.`
+    : ""
+  const prompt = `Write a tight, natural-sounding ~${minutes} minute spoken ${opts.format === "pitch_demo" ? "pitch + demo" : "demo"}-video narration script for the project "${meta.full}". Aim for about ${wordBudget} words so it fits ${opts.durationSec} seconds at a human speaking pace. Description: ${meta.description}. Stack: ${meta.language}. Live app: ${appUrl}. ${structure}${presenterLine} Use short, punchy sentences and separate each scene with a blank line. Return only the narration text.`
 
   if (hasGmi()) {
     try {
@@ -119,19 +134,37 @@ export async function writeScript(meta: RepoMeta, appUrl: string): Promise<strin
       // fall through
     }
   }
-  return simulatedScript(meta, appUrl)
+  return simulatedScript(meta, appUrl, opts)
 }
 
-function simulatedScript(meta: RepoMeta, appUrl: string): string {
-  return `Meet ${meta.full.split("/")[1]} — ${meta.description}
+function simulatedScript(meta: RepoMeta, appUrl: string, opts: ScriptOptions): string {
+  const name = meta.full.split("/")[1]
+  const paras: string[] = []
 
-Every developer knows the pain: you've shipped something great, but turning it into a compelling demo takes hours you don't have. That's the problem we're solving.
+  if (opts.format === "pitch_demo") {
+    paras.push(
+      `Here's the pitch. ${name} solves a problem every team feels: ${meta.description.toLowerCase().replace(/\.$/, "")}. It's built for the people who hit this wall every single day — and with the tooling finally mature enough, now is the moment to fix it.`,
+    )
+  }
 
-Let's take a look. Here's the live app running at ${appHost(appUrl)}. From the very first screen, the experience is fast and focused — no clutter, just the core flow. Watch as we move through the primary journey: the interface responds instantly, every interaction feels considered, and the whole thing just works.
+  paras.push(`Meet ${name} — ${meta.description}`)
+  paras.push(
+    `Every developer knows the pain: you've shipped something great, but turning it into a compelling demo takes hours you don't have. That's the problem we're solving.`,
+  )
+  paras.push(
+    `Let's take a look. Here's the live app running at ${appHost(appUrl)}. From the very first screen, the experience is fast and focused — no clutter, just the core flow. Watch as we move through the primary journey: the interface responds instantly, every interaction feels considered, and the whole thing just works.`,
+  )
+  paras.push(
+    `Under the hood, ${name} is built on ${meta.language} with a clean, modular architecture. The data flows through well-defined boundaries, the UI is fully responsive, and it's deployed and ready to scale.`,
+  )
+  paras.push(`That's ${name} — built to ship.`)
 
-Under the hood, ${meta.full.split("/")[1]} is built on ${meta.language} with a clean, modular architecture. The data flows through well-defined boundaries, the UI is fully responsive, and it's deployed and ready to scale.
-
-In under three minutes, you've seen the problem, the product, and the engineering behind it. That's ${meta.full.split("/")[1]} — built to ship.`
+  // Trim to fit shorter durations: keep the bookends, drop middle detail first.
+  if (opts.durationSec <= 90 && paras.length > 3) {
+    const last = paras[paras.length - 1]
+    return [...paras.slice(0, opts.format === "pitch_demo" ? 3 : 2), last].join("\n\n")
+  }
+  return paras.join("\n\n")
 }
 
 // --- ElevenLabs (voiceover) -------------------------------------------------

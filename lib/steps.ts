@@ -1,4 +1,4 @@
-import type { StepDef } from "./types"
+import type { StepDef, VideoFormat } from "./types"
 
 export const STEP_DEFS: StepDef[] = [
   {
@@ -52,7 +52,40 @@ export const STEP_DEFS: StepDef[] = [
   },
 ]
 
-export function logsFor(repoName: string, appHost: string): Record<string, string[]> {
+/** Optional step, inserted before compose only when a presenter cam is requested. */
+export const PRESENTER_STEP: StepDef = {
+  id: "presenter",
+  title: "Animate presenter",
+  description: "Turn the uploaded photo into a lip-synced talking head, timed to the voiceover.",
+  provider: "Devfields",
+  duration: 3000,
+}
+
+const ALL_STEP_DEFS: StepDef[] = [...STEP_DEFS, PRESENTER_STEP]
+
+/** Lookup so any consumer can resolve a step definition by id regardless of order. */
+export const STEP_DEF_BY_ID: Record<string, StepDef> = Object.fromEntries(
+  ALL_STEP_DEFS.map((d) => [d.id, d]),
+)
+
+/** Build the ordered pipeline for a given set of options. */
+export function buildPipeline(opts: { presenter: boolean }): StepDef[] {
+  const steps = [...STEP_DEFS]
+  if (opts.presenter) {
+    const idx = steps.findIndex((s) => s.id === "compose")
+    steps.splice(idx, 0, PRESENTER_STEP)
+  }
+  return steps
+}
+
+export function logsFor(
+  repoName: string,
+  appHost: string,
+  opts?: { format?: VideoFormat; durationSec?: number; presenterName?: string },
+): Record<string, string[]> {
+  const dur = opts?.durationSec ?? 178
+  const mmss = `${Math.floor(dur / 60)}m${String(dur % 60).padStart(2, "0")}s`
+  const pitch = opts?.format === "pitch_demo"
   return {
     ingest: [
       `git: resolving ${repoName}`,
@@ -64,14 +97,14 @@ export function logsFor(repoName: string, appHost: string): Record<string, strin
       "embedding source tree for retrieval",
       "detected: Next.js App Router, Tailwind, API routes",
       "identifying hero feature + 3 supporting flows",
-      "drafting narrative arc",
+      `reasoning: pacing a natural ${mmss} ${pitch ? "pitch + demo" : "demo"}`,
     ],
     script: [
       "prompt → GMI Cloud (llama-3.3-70b)",
-      "scene 1: the problem",
-      "scene 2: live walkthrough",
+      pitch ? "scene 1: the pitch — problem + market" : "scene 1: the problem",
+      pitch ? "scene 2: the product, live" : "scene 2: live walkthrough",
       "scene 3: under the hood + close",
-      "script: 412 words / ~2m54s read",
+      `script: paced to fit ${mmss} (human delivery)`,
     ],
     voiceover: [
       "sending script to ElevenLabs",
@@ -81,15 +114,21 @@ export function logsFor(repoName: string, appHost: string): Record<string, strin
     ],
     capture: [
       `launching headless browser → ${appHost}`,
-      "recording: landing → input → run",
-      "recording: live pipeline → result",
-      "captured 6 scenes / 1080p",
+      "replaying scripted scene actions per beat",
+      "recording viewport, paced to narration length",
+      "captured scenes @ 1080p (synced to audio)",
+    ],
+    presenter: [
+      opts?.presenterName ? `loading presenter: ${opts.presenterName}` : "loading presenter photo",
+      "generating talking-head frames",
+      "lip-syncing avatar to voiceover phonemes",
+      "rendering picture-in-picture cam (bottom-right)",
     ],
     compose: [
-      "aligning scenes to narration timestamps",
+      "muxing each scene's audio + capture clip",
       "burning in captions + lower-thirds",
-      "rendering 1080p / h.264",
-      "final cut: 2m58s",
+      `rendering 1080p / h.264 → ${mmss}`,
+      `final cut: ${mmss}`,
     ],
     publish: [
       "uploading video.mp4 → b2://devfields",
