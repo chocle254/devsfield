@@ -1,0 +1,3 @@
+"""
+Video generation pipeline modules
+"""
