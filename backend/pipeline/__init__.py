@@ -1,1 +1,3 @@
-# Devfields pipeline
+"""
+Video generation pipeline modules
+"""

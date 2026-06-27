@@ -1,155 +1,308 @@
+"""
+FastAPI backend for video generation pipeline.
+
+Endpoints:
+- POST /generate - Start a new video generation job
+- GET /status/{job_id} - Check job status
+- GET /stream/{job_id} - Stream job progress via SSE
+- GET /health - Health check
+"""
 import asyncio
 import json
 import os
 import uuid
 from datetime import datetime
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import uvicorn
+
+from pipeline.llm import generate_script, stream_script_generation
+from pipeline.tts import generate_scene_audio
+from pipeline.video import capture_all_screenshots, assemble_video
+from pipeline.storage import upload_all
+
+# Load environment variables
 from dotenv import load_dotenv
-
-from models import GenerateRequest, JobStatus, JobResult
-from jobs import create_job, get_job, fail_job
-from pipeline.orchestrator import run_pipeline
-
 load_dotenv()
 
-app = FastAPI(title="Devfields Backend")
+app = FastAPI(title="Video Generation API")
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# In-memory job store (in production, use a database)
+jobs: dict[str, dict] = {}
+jobs_lock = asyncio.Lock()
+
+
+class GenerateRequest(BaseModel):
+    """Request to generate a video"""
+    topic: str
+
+
+class JobStatus(BaseModel):
+    """Job status response"""
+    job_id: str
+    status: str  # pending, generating_script, capturing_screenshots, generating_audio, assembling_video, uploading, complete, failed
+    message: str
+    created_at: str
+    updated_at: str
+    video_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+async def process_job(job_id: str) -> None:
+    """
+    Main job processing pipeline.
+    
+    Args:
+        job_id: The unique job identifier
+    """
+    try:
+        topic = jobs[job_id]["topic"]
+        
+        # Step 1: Generate script
+        await update_job_status(job_id, "generating_script", "Generating video script...")
+        try:
+            script = await generate_script(topic)
+            jobs[job_id]["script"] = script
+        except Exception as e:
+            raise RuntimeError(f"Script generation failed: {str(e)}")
+        
+        # Step 2: Capture screenshots
+        await update_job_status(job_id, "capturing_screenshots", f"Capturing {len(script)} screenshots...")
+        try:
+            screenshots = await capture_all_screenshots(script)
+            jobs[job_id]["screenshots"] = screenshots
+        except Exception as e:
+            raise RuntimeError(f"Screenshot capture failed: {str(e)}")
+        
+        # Step 3: Generate audio
+        await update_job_status(job_id, "generating_audio", f"Generating audio for {len(script)} scenes...")
+        try:
+            audio_files = await generate_scene_audio(script)
+            jobs[job_id]["audio_files"] = audio_files
+        except Exception as e:
+            raise RuntimeError(f"Audio generation failed: {str(e)}")
+        
+        # Step 4: Assemble video
+        await update_job_status(job_id, "assembling_video", "Assembling final video...")
+        try:
+            video_path = f"/tmp/final_{job_id}.mp4"
+            video_path = assemble_video(
+                script,
+                screenshots,
+                audio_files,
+                video_path,
+            )
+            jobs[job_id]["video_path"] = video_path
+        except Exception as e:
+            raise RuntimeError(f"Video assembly failed: {str(e)}")
+        
+        # Step 5: Upload to storage
+        await update_job_status(job_id, "uploading", "Uploading to cloud storage...")
+        try:
+            upload_result = await upload_all(job_id, video_path, script)
+            jobs[job_id]["upload_result"] = upload_result
+            jobs[job_id]["video_url"] = upload_result.get("video_url")
+        except Exception as e:
+            raise RuntimeError(f"Upload failed: {str(e)}")
+        
+        # Mark complete
+        await update_job_status(job_id, "complete", "Video generation complete!")
+        
+        # Cleanup
+        try:
+            if os.path.exists(video_path):
+                os.unlink(video_path)
+        except:
+            pass
+        
+    except Exception as e:
+        error_msg = str(e)
+        await update_job_status(job_id, "failed", f"Job failed: {error_msg}", error=error_msg)
+
+
+async def update_job_status(
+    job_id: str,
+    status: str,
+    message: str,
+    error: Optional[str] = None,
+) -> None:
+    """
+    Update job status safely.
+    
+    Args:
+        job_id: The job identifier
+        status: New status
+        message: Status message
+        error: Error message if applicable
+    """
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["status"] = status
+            jobs[job_id]["message"] = message
+            jobs[job_id]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            if error:
+                jobs[job_id]["error"] = error
 
 
 @app.post("/generate")
-async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
-    """Start a new video generation job."""
-    # Check GITHUB_TOKEN
-    if not os.environ.get("GITHUB_TOKEN"):
-        raise HTTPException(
-            status_code=400,
-            detail="Server configuration error: GITHUB_TOKEN not set"
-        )
+async def generate(request: GenerateRequest) -> dict:
+    """
+    Start a new video generation job.
     
-    # Validate github_url
-    if not request.github_url.startswith("https://github.com/"):
+    Args:
+        request: GenerateRequest with topic
+        
+    Returns:
+        Job details with job_id
+    """
+    # Validate GitHub token
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if not github_token:
         raise HTTPException(
             status_code=400,
-            detail="github_url must be a valid GitHub repository URL"
-        )
-    
-    # Validate app_url
-    if not request.app_url.startswith("https://"):
-        raise HTTPException(
-            status_code=400,
-            detail="app_url must be a valid HTTPS URL"
+            detail="Server configuration error: GITHUB_TOKEN not set",
         )
     
     # Create job
     job_id = str(uuid.uuid4())
-    await create_job(job_id)
+    now = datetime.utcnow().isoformat() + "Z"
     
-    # Launch pipeline in background
-    background_tasks.add_task(run_pipeline, job_id, request)
+    async with jobs_lock:
+        jobs[job_id] = {
+            "topic": request.topic,
+            "status": "pending",
+            "message": "Queued for processing",
+            "created_at": now,
+            "updated_at": now,
+            "error": None,
+            "video_url": None,
+        }
     
-    return {"job_id": job_id, "status": "queued"}
+    # Start background processing
+    asyncio.create_task(process_job(job_id))
+    
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Job queued for processing",
+        "created_at": now,
+    }
 
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str):
-    """Get current status of a job."""
-    job = await get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+async def get_status(job_id: str) -> JobStatus:
+    """
+    Get the current status of a job.
     
-    return JobStatus(
-        job_id=job_id,
-        status=job["status"],
-        current_step=job["current_step"],
-        steps_completed=job["steps_completed"],
-        steps_total=7,
-        message=job["message"],
-        error=job["error"],
-    )
+    Args:
+        job_id: The job identifier
+        
+    Returns:
+        Job status details
+    """
+    async with jobs_lock:
+        if job_id not in jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job = jobs[job_id]
+        return JobStatus(
+            job_id=job_id,
+            status=job["status"],
+            message=job["message"],
+            created_at=job["created_at"],
+            updated_at=job["updated_at"],
+            video_url=job.get("video_url"),
+            error=job.get("error"),
+        )
 
 
-@app.get("/result/{job_id}")
-async def get_result(job_id: str):
-    """Get result of a completed job."""
-    job = await get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+async def job_stream_generator(job_id: str):
+    """
+    Generate SSE events for job progress.
     
-    if job["status"] != "complete":
-        return {
-            "status": job["status"],
-            "message": "Job not complete yet"
-        }, 202
+    Args:
+        job_id: The job identifier
+        
+    Yields:
+        SSE-formatted event strings
+    """
+    seen_statuses = set()
     
-    result = job.get("result", {})
-    return JobResult(
-        job_id=job_id,
-        status=job["status"],
-        video_url=result.get("video_url"),
-        manifest_url=result.get("manifest_url"),
-        sha256=result.get("sha256"),
-        models_used=result.get("models_used"),
-        duration_seconds=result.get("duration_seconds"),
-        generated_at=result.get("generated_at"),
-    )
+    while True:
+        async with jobs_lock:
+            if job_id not in jobs:
+                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                break
+            
+            job = jobs[job_id]
+            status = job["status"]
+            
+            # Only send if status changed
+            if status not in seen_statuses:
+                seen_statuses.add(status)
+                event_data = {
+                    "job_id": job_id,
+                    "status": status,
+                    "message": job["message"],
+                    "updated_at": job["updated_at"],
+                }
+                if job.get("video_url"):
+                    event_data["video_url"] = job["video_url"]
+                if job.get("error"):
+                    event_data["error"] = job["error"]
+                
+                yield f"data: {json.dumps(event_data)}\n\n"
+            
+            # Stop if complete or failed
+            if status in ("complete", "failed"):
+                break
+        
+        # Wait before polling again
+        await asyncio.sleep(1)
 
 
 @app.get("/stream/{job_id}")
-async def stream_status(job_id: str):
-    """Stream job status updates as Server-Sent Events."""
-    job = await get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+async def stream_job(job_id: str):
+    """
+    Stream job progress via Server-Sent Events.
     
-    async def event_generator():
-        while True:
-            job_data = await get_job(job_id)
-            if job_data is None:
-                break
-            
-            event_data = {
-                "job_id": job_id,
-                "status": job_data["status"],
-                "current_step": job_data["current_step"],
-                "steps_completed": job_data["steps_completed"],
-                "message": job_data["message"],
-                "error": job_data["error"],
-            }
-            
-            yield f"data: {json.dumps(event_data)}\n\n"
-            
-            if job_data["status"] in ["complete", "failed"]:
-                break
-            
-            await asyncio.sleep(1)
-    
+    Args:
+        job_id: The job identifier
+        
+    Returns:
+        StreamingResponse with SSE events
+    """
     return StreamingResponse(
-        event_generator(),
+        job_stream_generator(job_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+        },
     )
 
 
 @app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+async def health_check() -> dict:
+    """
+    Health check endpoint.
+    
+    Returns:
+        Health status
+    """
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+    )
+>>>>>>> main

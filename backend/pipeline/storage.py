@@ -1,64 +1,94 @@
-import os
+"""
+Storage and upload to Backblaze B2
+"""
+import asyncio
 import json
-import hashlib
+import os
 from datetime import datetime
-import httpx
+
+from genblaze_core import ObjectStorageSink, KeyStrategy
+from genblaze_s3 import S3StorageBackend
 
 
 async def upload_all(job_id: str, video_path: str, script: list[dict]) -> dict:
-    """Upload video and manifest to Backblaze B2."""
+    """
+    Upload video, script, and manifest to Backblaze B2.
     
-    # Get B2 credentials
-    b2_key_id = os.environ.get("B2_KEY_ID")
-    b2_app_key = os.environ.get("B2_APP_KEY")
-    b2_bucket = os.environ.get("B2_BUCKET", "devfields")
-    b2_public_url = os.environ.get("B2_PUBLIC_URL", "https://f005.backblazeb2.com/file")
+    Args:
+        job_id: Unique job identifier
+        video_path: Path to the final video file
+        script: The script data structure
+        
+    Returns:
+        Dict with upload results and URLs
+    """
+    b2_bucket = os.environ.get("B2_BUCKET")
+    b2_public_url = os.environ.get("B2_PUBLIC_URL", "")
     
-    if not all([b2_key_id, b2_app_key, b2_bucket]):
-        raise RuntimeError("Backblaze B2 credentials not configured")
+    if not b2_bucket:
+        raise ValueError("B2_BUCKET not set in environment")
     
-    # Read video file
+    # Initialize Backblaze backend
+    backend = S3StorageBackend.for_backblaze(
+        b2_bucket,
+        public_url_base=b2_public_url,
+    )
+    
+    sink = ObjectStorageSink(
+        backend,
+        prefix=f"jobs/{job_id}",
+        key_strategy=KeyStrategy.HIERARCHICAL,
+    )
+    
+    # Upload video
     with open(video_path, "rb") as f:
         video_data = f.read()
     
-    # Calculate SHA256
-    video_sha256 = hashlib.sha256(video_data).hexdigest()
+    video_key = f"jobs/{job_id}/final_video.mp4"
+    video_url = await asyncio.to_thread(
+        backend.put,
+        video_key,
+        video_data,
+        content_type="video/mp4"
+    )
     
-    # Build manifest
+    # Upload script as JSON
+    script_json = json.dumps(script, indent=2).encode()
+    script_key = f"jobs/{job_id}/script.json"
+    script_url = await asyncio.to_thread(
+        backend.put,
+        script_key,
+        script_json,
+        content_type="application/json"
+    )
+    
+    # Upload manifest
     manifest = {
         "job_id": job_id,
-        "generated_at": datetime.utcnow().isoformat(),
-        "video_sha256": video_sha256,
-        "script": script,
-        "storage": {
-            "provider": "Backblaze B2",
-            "bucket": b2_bucket,
-        }
-    }
-    manifest_json = json.dumps(manifest, indent=2)
-    
-    # For now, simulate B2 upload (real implementation would use boto3 or genblaze-s3)
-    # In production, you would:
-    # 1. Get B2 auth token
-    # 2. Get upload URL from B2
-    # 3. Upload video and manifest files
-    
-    video_key = f"runs/{job_id}/demo.mp4"
-    manifest_key = f"runs/{job_id}/manifest.json"
-    
-    video_url = f"{b2_public_url}/{b2_bucket}/{video_key}"
-    manifest_url = f"{b2_public_url}/{b2_bucket}/{manifest_key}"
-    
-    return {
-        "job_id": job_id,
-        "video_url": video_url,
-        "manifest_url": manifest_url,
-        "sha256": video_sha256,
+        "video_key": video_key,
+        "script_key": script_key,
         "models_used": {
             "llm": "deepseek-ai/DeepSeek-V3-0324",
-            "tts": "eleven_multilingual_v2",
-            "video_codec": "libx264",
+            "tts": "ElevenLabs-TTS-v3 via GMI Cloud",
+            "compositor": "FFmpeg",
         },
-        "duration_seconds": 180,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    manifest_json = json.dumps(manifest, indent=2).encode()
+    manifest_key = f"jobs/{job_id}/manifest.json"
+    manifest_url = await asyncio.to_thread(
+        backend.put,
+        manifest_key,
+        manifest_json,
+        content_type="application/json"
+    )
+    
+    backend.close()
+    
+    return {
+        "video_url": video_url or f"{b2_public_url}/{video_key}",
+        "manifest_url": manifest_url or f"{b2_public_url}/{manifest_key}",
+        "script_url": script_url or f"{b2_public_url}/{script_key}",
+        "models_used": manifest["models_used"],
+        "generated_at": manifest["generated_at"],
     }
