@@ -1,48 +1,40 @@
+"""
+Voiceover generation using genblaze-gmicloud (ElevenLabs via GMI Cloud).
+"""
 import os
 import httpx
+from genblaze_core import Pipeline, Modality
+from genblaze_gmicloud import GMICloudAudioProvider
 
 
 async def generate_voice(script: list[dict], job_id: str) -> str:
-    """Generate voiceover audio using ElevenLabs."""
-    
-    # Extract all text from script
+    """Generate voiceover audio using ElevenLabs TTS via GMI Cloud + Genblaze."""
+
     full_text = " ... ".join([s["text"] for s in script])
-    
-    # Get API key
-    api_key = os.environ.get("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise ValueError("ELEVENLABS_API_KEY not set")
-    
-    # Use George voice (professional male)
-    voice_id = "JBFqnCBsd6RMkjVDRZzb"
-    
-    # Call ElevenLabs
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={
-                "xi-api-key": api_key,
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
-            },
-            json={
-                "text": full_text,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75
-                }
-            }
+
+    gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
+    if not gmi_api_key:
+        raise ValueError("GMI_CLOUD_API_KEY not set")
+
+    run, manifest = (
+        Pipeline(f"devfields-voice-{job_id}")
+        .step(
+            GMICloudAudioProvider(api_key=gmi_api_key),
+            model="elevenlabs-tts-v3",
+            prompt=full_text,
+            modality=Modality.AUDIO,
         )
-    
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"ElevenLabs TTS failed: {response.status_code} {response.text}"
-        )
-    
-    # Save audio
+        .run(timeout=120)
+    )
+
+    step = run.steps[0]
+    if step.status != "succeeded" or not step.assets:
+        raise RuntimeError(f"Voice generation failed: {step.error}")
+
     audio_path = f"/tmp/voice_{job_id}.mp3"
-    with open(audio_path, "wb") as f:
-        f.write(response.content)
-    
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.get(step.assets[0].url)
+        with open(audio_path, "wb") as f:
+            f.write(r.content)
+
     return audio_path
