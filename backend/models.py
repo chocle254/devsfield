@@ -16,7 +16,7 @@ class JobStatus(BaseModel):
     status: str  # "queued", "in_progress", "complete", "failed"
     current_step: Optional[str] = None
     steps_completed: list[str] = []
-    steps_total: int = 6
+    steps_total: int = 7
     message: Optional[str] = None
     error: Optional[str] = None
 
