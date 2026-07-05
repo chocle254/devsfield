@@ -4,7 +4,8 @@ playwright==1.44.0
 httpx==0.25.2
 python-dotenv==1.0.0
 pydantic==2.5.0
+boto3==1.34.69
 ffmpeg-python==0.2.0
-genblaze-core==0.4.0
-genblaze-s3==0.2.1
-genblaze-gmicloud==0.3.0
+genblaze-core==0.2.4
+genblaze-s3==0.2.4
+genblaze-gmicloud==0.2.6
