@@ -1,28 +1,17 @@
 """
-AI-guided intelligent app navigation and screen recording.
-
-Uses Playwright to open the live app, then loops: read the accessibility
-tree, ask an LLM what to click next based on the repo's README context,
-execute the action, repeat. Produces a meaningful screen recording instead
-of blind clicking.
+AI-guided intelligent app navigation with segment timestamp tracking.
 """
 import json
 import os
 import shutil
+import time
 import uuid
 
 import httpx
 from playwright.async_api import async_playwright
 
 
-async def get_next_action(
-    page_snapshot: dict,
-    repo_context: dict,
-    actions_taken: list[dict],
-    step_number: int,
-) -> dict:
-    """Ask GMI Cloud LLM what to do next based on current page state."""
-
+async def get_next_action(page_snapshot, repo_context, actions_taken, step_number):
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     if not gmi_api_key:
         return {"action": "wait", "selector": None, "value": None,
@@ -31,51 +20,42 @@ async def get_next_action(
     system_prompt = (
         "You are an expert product demo director. Your job is to navigate "
         "a web app to show its most impressive features for a demo video. "
-        "You will be given the current page state as an accessibility tree "
-        "and context about what the app does. Decide the single best next "
-        "action that will look good on camera and show real functionality. "
-        "Be deliberate. Show the core features. Avoid settings pages, auth "
+        "Decide the single best next action based on the accessibility tree "
+        "and README context. Be deliberate. Avoid settings pages, auth "
         "flows unless login is the feature, and error states."
     )
 
     snapshot_json = json.dumps(page_snapshot, indent=2)[:3000]
     readme_snippet = (repo_context.get("readme") or "")[:1000]
 
-    user_prompt = f"""App description: {repo_context.get('description', 'No description')}
+    user_prompt = f"""App description: {repo_context.get('description', '')}
 Framework: {repo_context.get('framework', 'Unknown')}
 README summary: {readme_snippet}
 
 Current page accessibility tree:
 {snapshot_json}
 
-Actions already taken (do not repeat these):
+Actions already taken:
 {json.dumps(actions_taken, indent=2)}
 
 Step {step_number} of maximum 8 steps.
 
-What is the single best next action to take?
-Return ONLY valid JSON with exactly these fields:
+Return ONLY valid JSON:
 {{
   "action": "click" | "type" | "scroll" | "wait" | "navigate" | "done",
   "selector": "role and name e.g. button[name='Sign In']",
-  "value": "text to type if action is type, URL if navigate, else null",
+  "value": "text to type or URL, else null",
   "reason": "one sentence explaining why this shows a good feature",
   "done": true | false
 }}
-
-Return "done": true only if you have shown the core features and a good
-demo has been recorded. Never return done on step 1. If you cannot find
-anything meaningful to interact with, return done.
-Return ONLY the JSON object. No markdown. No explanation."""
+Never return done on step 1. Return ONLY the JSON object."""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 "https://api.gmi-serving.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {gmi_api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Authorization": f"Bearer {gmi_api_key}",
+                         "Content-Type": "application/json"},
                 json={
                     "model": "deepseek-ai/DeepSeek-V3-0324",
                     "messages": [
@@ -86,50 +66,52 @@ Return ONLY the JSON object. No markdown. No explanation."""
                     "max_tokens": 500,
                 },
             )
-
         if response.status_code != 200:
             return {"action": "wait", "selector": None, "value": None,
                     "reason": "LLM call failed", "done": False}
 
         content = response.json()["choices"][0]["message"]["content"].strip()
-
         if content.startswith("```json"):
             content = content[7:]
         if content.startswith("```"):
             content = content[3:]
         if content.endswith("```"):
             content = content[:-3]
-        content = content.strip()
-
-        return json.loads(content)
-
+        return json.loads(content.strip())
     except Exception:
         return {"action": "wait", "selector": None, "value": None,
                 "reason": "parse error", "done": False}
 
 
-async def record_app(app_url: str, repo_context: dict = None) -> str:
-    """Record the app using AI-guided navigation and return the video path."""
+async def record_app(app_url: str, repo_context: dict = None) -> dict:
+    """
+    Record the app with AI-guided navigation, tracking segment timestamps.
 
+    Returns:
+        {
+          "video_path": str,           # full continuous recording
+          "segments": [
+            {"segment_id": 1, "start_time": 0.0, "end_time": 4.2,
+             "action": "click", "reason": "..."},
+            ...
+          ]
+        }
+    """
     if repo_context is None:
         repo_context = {"description": "", "framework": "", "readme": ""}
 
     recording_dir = f"/tmp/rec_{uuid.uuid4().hex}"
     os.makedirs(recording_dir, exist_ok=True)
     output_path = f"/tmp/screen_{uuid.uuid4().hex}.mp4"
+    segments = []
 
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=[
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                ],
+                args=["--disable-dev-shm-usage", "--no-sandbox",
+                      "--disable-gpu", "--disable-software-rasterizer"],
             )
-
             context = await browser.new_context(
                 viewport={"width": 1280, "height": 720},
                 record_video_dir=recording_dir,
@@ -138,6 +120,7 @@ async def record_app(app_url: str, repo_context: dict = None) -> str:
             page = await context.new_page()
 
             try:
+                recording_start = time.monotonic()
                 await page.goto(app_url, wait_until="networkidle", timeout=90000)
                 await page.wait_for_timeout(2000)
 
@@ -145,6 +128,7 @@ async def record_app(app_url: str, repo_context: dict = None) -> str:
                 max_steps = 8
 
                 for step in range(max_steps):
+                    segment_start = time.monotonic() - recording_start
                     try:
                         snapshot = await page.accessibility.snapshot()
                         if snapshot is None:
@@ -191,8 +175,7 @@ async def record_app(app_url: str, repo_context: dict = None) -> str:
                         elif action_type == "navigate" and value:
                             try:
                                 target = value if value.startswith("http") else (
-                                    app_url.rstrip("/") + "/" + value.lstrip("/")
-                                )
+                                    app_url.rstrip("/") + "/" + value.lstrip("/"))
                                 await page.goto(target, wait_until="networkidle", timeout=30000)
                             except Exception:
                                 pass
@@ -202,11 +185,17 @@ async def record_app(app_url: str, repo_context: dict = None) -> str:
 
                         await page.wait_for_timeout(2000)
 
-                        actions_taken.append({
-                            "step": step + 1,
+                        segment_end = time.monotonic() - recording_start
+                        segments.append({
+                            "segment_id": step + 1,
+                            "start_time": round(segment_start, 2),
+                            "end_time": round(segment_end, 2),
                             "action": action_type,
-                            "selector": selector,
                             "reason": decision.get("reason", ""),
+                        })
+                        actions_taken.append({
+                            "step": step + 1, "action": action_type,
+                            "selector": selector, "reason": decision.get("reason", ""),
                         })
 
                     except Exception:
@@ -226,7 +215,12 @@ async def record_app(app_url: str, repo_context: dict = None) -> str:
             shutil.move(str(recorded_path), output_path)
             shutil.rmtree(recording_dir, ignore_errors=True)
 
-            return output_path
+            # If nothing was captured, make one segment covering the whole video
+            if not segments:
+                segments = [{"segment_id": 1, "start_time": 0.0, "end_time": None,
+                             "action": "view", "reason": "App overview"}]
+
+            return {"video_path": output_path, "segments": segments}
 
     except Exception as e:
         shutil.rmtree(recording_dir, ignore_errors=True)
