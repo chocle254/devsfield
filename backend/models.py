@@ -22,11 +22,12 @@ class JobStatus(BaseModel):
 
 
 class JobResult(BaseModel):
-    """Result of a completed job."""
     job_id: str
     status: str
     video_url: Optional[str] = None
     manifest_url: Optional[str] = None
+    segments_url: Optional[str] = None      # NEW
+    segments: Optional[list[dict]] = None   # NEW
     sha256: Optional[str] = None
     models_used: Optional[dict] = None
     duration_seconds: Optional[int] = None
