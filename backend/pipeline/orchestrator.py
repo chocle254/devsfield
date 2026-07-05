@@ -22,7 +22,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
         
         # Step 2: Record app
         await set_step(job_id, "app_browser", "Recording your live app...")
-        recording_path = await app_browser.record_app(request.app_url)
+        recording_path = await app_browser.record_app(request.app_url, context)
         await add_tmp_file(job_id, recording_path)
         await complete_step(job_id, "app_browser")
         
