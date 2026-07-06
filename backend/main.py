@@ -40,6 +40,9 @@ async def generate(request: GenerateRequest) -> dict:
     """Start a new demo video generation job."""
 
     # Required environment variables
+    # NOTE: ELEVENLABS_API_KEY removed — voice_generator.py now uses
+    # genblaze-gmicloud (GMICloudAudioProvider), which only needs
+    # GMI_CLOUD_API_KEY. No separate ElevenLabs account needed.
     if not os.environ.get("GITHUB_TOKEN"):
         raise HTTPException(
             status_code=400,
@@ -49,11 +52,6 @@ async def generate(request: GenerateRequest) -> dict:
         raise HTTPException(
             status_code=400,
             detail="Server configuration error: GMI_CLOUD_API_KEY not set",
-        )
-    if not os.environ.get("ELEVENLABS_API_KEY"):
-        raise HTTPException(
-            status_code=400,
-            detail="Server configuration error: ELEVENLABS_API_KEY not set",
         )
     if not os.environ.get("B2_BUCKET"):
         raise HTTPException(
@@ -76,8 +74,6 @@ async def generate(request: GenerateRequest) -> dict:
     job_id = str(uuid.uuid4())
     await create_job(job_id)
 
-    # Launch pipeline in the background — this is the line that was
-    # missing entirely from the old main.py
     asyncio.create_task(run_pipeline(job_id, request))
 
     return {"job_id": job_id, "status": "queued"}
@@ -117,6 +113,8 @@ async def get_result(job_id: str):
         status=job["status"],
         video_url=result.get("video_url"),
         manifest_url=result.get("manifest_url"),
+        segments_url=result.get("segments_url"),   # NEW
+        segments=result.get("segments"),            # NEW
         sha256=result.get("sha256"),
         models_used=result.get("models_used"),
         generated_at=result.get("generated_at"),
