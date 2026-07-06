@@ -1,467 +1,184 @@
 # Devfields
 
-### AI-powered demo video generator for builders who ship, not present.
+**AI-powered demo video generator for hackathon builders.**
 
----
+Point Devfields at your GitHub repo and your deployed app URL. It reads your
+code, intelligently navigates your live app, writes a narrated script, generates
+a professional voiceover, composites a final video, and stores everything on
+Backblaze B2 — all without you touching OBS, ElevenLabs' dashboard, or a video
+editor.
 
-## What Is Devfields?
-
-Devfields turns a GitHub repo and a deployed app URL into a polished, ready-to-submit 3-minute demo video — automatically.
-
-No OBS. No ElevenLabs tab-switching. No agonizing over what to show. No recording yourself explaining your own project six times.
-
-You paste two URLs. Devfields reads your code, browses your live app, writes a script, generates a human-sounding voiceover, records the app in action, assembles everything into a video, and uploads it to Backblaze B2. You download and submit.
-
-Built for the Backblaze Generative Media Hackathon using Genblaze + Backblaze B2 + GMI Cloud.
+Built for the [Backblaze Generative Media Hackathon](https://backblaze-generative-media.devpost.com/).
 
 ---
 
 ## The Problem
 
-Every hackathon requires a demo video. Every builder hates making it.
-
-The skills needed to build a great app and the skills needed to present one are completely different. Builders spend days on the product, then scramble to produce a 3-minute video that does it justice — juggling screen recording software, voiceover tools, video editors, and writing a script that covers everything without running long.
-
-The result is almost always underwhelming compared to the actual product.
-
-Devfields solves this for builders.
+Great hackathon projects lose because of bad demo videos, not bad code. Recording,
+narrating, and editing a 3-minute demo eats hours that should go into the product.
+Devfields automates the entire pipeline: from a GitHub URL and a live app URL to
+a finished, narrated MP4.
 
 ---
 
 ## How It Works
 
-```
-GitHub URL + Deployed App URL
-          │
-          ▼
-┌─────────────────────┐
-│   GitHub Reader     │  Reads README, key source files, and structure
-│   (GMI LLM)        │  Understands what the project does and how
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   App Browser       │  Playwright navigates the live deployed app
-│   (Playwright)      │  Screen-records the actual UI working in real time
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Script Writer     │  Combines code understanding + app recording
-│   (DeepSeek/Llama   │  Writes a structured, timed narration script
-│    via GMI)         │  Decides what to show and in what order
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Voice Generator   │  ElevenLabs eleven_v3 via Genblaze
-│   (Genblaze +       │  Generates human-sounding voiceover from script
-│    ElevenLabs)      │  Natural pacing, emotional range, not robotic
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Video Assembler   │  GMI Cloud video model via Genblaze Pipeline
-│   (Genblaze +       │  Syncs screen recording with voiceover
-│    GMI Cloud)       │  Adds transitions, titles, and closing slide
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Backblaze B2      │  All assets stored with SHA-256 provenance
-│   (genblaze-s3)     │  Durable URL returned to user
-└─────────────────────┘
-          │
-          ▼
-   Download your video.
-   Submit to the hackathon.
-```
+Devfields runs a 7-step pipeline for every job:
+
+1. **Read the repo** — fetches the README, file tree, framework, and key source
+   files via the GitHub API
+2. **Navigate the live app with AI** — a Playwright-controlled headless browser
+   reads the page's accessibility tree at each step and asks an LLM what to click
+   next, based on what the README says the app actually does. This produces a
+   meaningful recording of real features instead of blind clicking.
+3. **Write a segmented narration script** — one narration line generated per
+   navigation segment, so the voiceover is synced to what's actually on screen
+4. **Generate a title card** — an AI-generated branded image for the video open
+5. **Generate the voiceover** — one voice clip per segment
+6. **Composite the video** — each segment's screen clip is padded to match its
+   voiceover length, merged with FFmpeg, and concatenated into a final MP4
+7. **Upload to Backblaze B2** — the final video, every individual segment (clip +
+   voice), a segment manifest, and a SHA-256 provenance manifest are all stored
+
+Progress streams live to the frontend via Server-Sent Events.
 
 ---
 
-## Tech Stack
+## Architecture
 
-### Frontend
-| Layer | Choice | Why |
-|---|---|---|
-| Framework | Next.js 14 (App Router) | Vercel-native, fast, familiar |
-| Styling | Tailwind CSS | Rapid UI, no overhead |
-| Deployment | Vercel | Zero config, instant deploys |
-| Real-time | Server-Sent Events (SSE) | Stream pipeline progress to the UI |
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14, deployed on Vercel |
+| Backend | FastAPI + Python 3.11, deployed on Railway |
+| Browser automation | Playwright (headless Chromium) |
+| AI navigation decisions | DeepSeek-V3-0324 via GMI Cloud |
+| Narration script writing | DeepSeek-V3-0324 via GMI Cloud |
+| Voiceover generation | ElevenLabs TTS v3 via GMI Cloud, orchestrated by **Genblaze** |
+| Title card generation | Seedream 5.0 Lite via GMI Cloud, orchestrated by **Genblaze** |
+| Video/audio compositing | FFmpeg (deterministic — not an AI step) |
+| Storage | Backblaze B2, via **Genblaze**'s S3-compatible storage backend |
 
-### Backend
-| Layer | Choice | Why |
-|---|---|---|
-| Framework | FastAPI | Async-first, perfect for long-running pipeline tasks |
-| Job handling | asyncio background tasks | Simple, no Redis needed for hackathon scope |
-| Browser automation | Playwright (with video recording) | Built-in MP4 screen recording, headless Chromium |
-| Deployment | Railway | Docker support, Playwright-compatible, connects to Vercel |
+---
 
-### AI / Media Pipeline
-| Layer | Choice | Why |
-|---|---|---|
-| SDK | Genblaze | Orchestrates all providers, provenance by default |
-| LLM (script) | DeepSeek-V3.2 via GMI Cloud | Code understanding + script writing, free credits |
-| TTS (voice) | ElevenLabs eleven_v3 via Genblaze | Most human-sounding output in blind tests |
-| Video | GMI Cloud (Seedance / Kling) via Genblaze | Free credits, strong quality |
-| Storage | Backblaze B2 via genblaze-s3 | Durable URLs, SHA-256 provenance manifest |
+## Providers & Models Used
+
+- **DeepSeek-V3-0324** (via GMI Cloud) — narration script writing and AI-guided
+  app navigation decisions
+- **ElevenLabs TTS v3** (via GMI Cloud, orchestrated through Genblaze's
+  `GMICloudAudioProvider`) — segment-by-segment voiceover generation
+- **Seedream 5.0 Lite** (via GMI Cloud, orchestrated through Genblaze's
+  `GMICloudImageProvider`) — title card image generation
+- **FFmpeg** — screen recording is split into per-segment clips, padded to match
+  voiceover duration, merged with audio, and concatenated into the final video
+- **Backblaze B2** (via Genblaze's `S3StorageBackend`) — durable storage for the
+  final video, every individual segment, the segment manifest, and the
+  SHA-256 provenance manifest
+
+---
+
+## How Devfields Uses Backblaze B2 & Genblaze
+
+**Backblaze B2** stores every generated asset for every job:
+jobs/{job_id}/final_video.mp4
+jobs/{job_id}/manifest.json           ← SHA-256 hash, models used, timestamp
+jobs/{job_id}/segments_manifest.json  ← index of every individual segment
+jobs/{job_id}/segments/{segment_id}/clip.mp4
+jobs/{job_id}/segments/{segment_id}/voice.mp3
+Storing each segment individually — not just the final composited video — means
+a specific part of a generated demo can be regenerated and re-composited later
+without re-running the entire pipeline.
+
+**Genblaze** orchestrates two distinct generative media modalities across two
+GMI Cloud providers:
+
+- `Modality.AUDIO` via `GMICloudAudioProvider` (ElevenLabs TTS v3)
+- `Modality.IMAGE` via `GMICloudImageProvider` (Seedream 5.0 Lite)
+
+Both pipelines are written using Genblaze's `Pipeline` API, and their outputs are
+uploaded to B2 using Genblaze's `S3StorageBackend` and `ObjectStorageSink`
+(`KeyStrategy.HIERARCHICAL`).
 
 ---
 
 ## Project Structure
-
-```
-devfields/
-│
-├── frontend/                          # Next.js 14 — deployed to Vercel
-│   ├── app/
-│   │   ├── layout.tsx                 # Root layout, fonts, global styles
-│   │   ├── page.tsx                   # Landing page + URL input
-│   │   ├── generate/
-│   │   │   └── [jobId]/
-│   │   │       └── page.tsx           # Live pipeline progress page
-│   │   └── result/
-│   │       └── [jobId]/
-│   │           └── page.tsx           # Video player + download
-│   │
-│   ├── components/
-│   │   ├── URLInput.tsx               # Dual URL input with validation
-│   │   ├── GenerateButton.tsx         # Submit + loading state
-│   │   ├── PipelineProgress.tsx       # Step-by-step progress tracker (SSE)
-│   │   ├── VideoPlayer.tsx            # Final video player
-│   │   └── ProvenanceCard.tsx         # Shows models used, timestamps, B2 hash
-│   │
-│   ├── lib/
-│   │   └── api.ts                     # Backend API calls
-│   │
-│   ├── .env.local                     # NEXT_PUBLIC_BACKEND_URL
-│   ├── next.config.ts
-│   ├── tailwind.config.ts
-│   └── package.json
-│
-├── backend/                           # FastAPI — deployed to Railway
-│   ├── main.py                        # App entry point, routes
-│   ├── models.py                      # Pydantic schemas (Job, Status, Result)
-│   ├── jobs.py                        # In-memory job state management
-│   │
+devsfield/
+├── app/                    # Next.js frontend (App Router) — deployed to Vercel
+├── components/
+├── lib/
+├── public/
+├── backend/                # FastAPI backend — deployed to Railway
+│   ├── main.py
+│   ├── models.py
+│   ├── jobs.py
 │   ├── pipeline/
-│   │   ├── __init__.py
-│   │   ├── orchestrator.py            # Runs all steps in order, updates job state
-│   │   ├── github_reader.py           # Reads repo via GitHub API or cloning
-│   │   ├── app_browser.py             # Playwright screen recording of live app
-│   │   ├── script_writer.py           # LLM script generation from code + recording
-│   │   ├── voice_generator.py         # ElevenLabs TTS via Genblaze
-│   │   ├── video_assembler.py         # Genblaze Pipeline → GMI video + audio sync
-│   │   └── storage.py                 # Backblaze B2 uploads via genblaze-s3
-│   │
-│   ├── .env                           # All API keys
-│   ├── Dockerfile                     # Includes Playwright + Chromium
+│   │   ├── github_reader.py
+│   │   ├── app_browser.py       # AI-guided navigation + segmented recording
+│   │   ├── script_writer.py     # per-segment narration generation
+│   │   ├── image_generator.py   # Genblaze + GMI Cloud (Seedream)
+│   │   ├── voice_generator.py   # Genblaze + GMI Cloud (ElevenLabs)
+│   │   ├── video_assembler.py   # FFmpeg split/pad/merge/concat
+│   │   ├── segment_tools.py     # shared ffprobe/ffmpeg helpers
+│   │   ├── storage.py           # Genblaze S3 backend → Backblaze B2
+│   │   └── orchestrator.py      # runs all 7 steps in order
 │   ├── requirements.txt
-│   └── railway.json                   # Railway deployment config
-│
+│   ├── Dockerfile
+│   └── railway.json
+├── package.json
 └── README.md
-```
-
 ---
 
-## API Routes
+## Getting Started
 
-### `POST /generate`
-Accepts GitHub URL and deployed app URL. Kicks off the pipeline. Returns a job ID immediately.
+### Prerequisites
 
-**Request:**
-```json
-{
-  "github_url": "https://github.com/username/project",
-  "app_url": "https://myproject.vercel.app",
-  "video_length": 180,
-  "tone": "pitch"
-}
-```
+- Node.js 18+
+- Python 3.11
+- A [Backblaze B2](https://www.backblaze.com/cloud-storage) account and bucket
+- A [GMI Cloud](https://cloud.gmi.ai) account (covers LLM, TTS, and image generation)
+- A GitHub personal access token
 
-**Response:**
-```json
-{
-  "job_id": "uuid-here",
-  "status": "queued"
-}
-```
+### Frontend
 
----
+```bash
+npm install
+npm run dev
 
-### `GET /status/{job_id}`
-Returns current pipeline step and progress. Used by SSE to stream updates to the frontend.
+###Backend
+cd backend
+pip install -r requirements.txt --break-system-packages
+playwright install chromium
+uvicorn main:app --reload
 
-**Response:**
-```json
-{
-  "job_id": "uuid-here",
-  "status": "in_progress",
-  "current_step": "script_writer",
-  "steps_completed": ["github_reader", "app_browser"],
-  "steps_total": 5,
-  "message": "Writing your narration script..."
-}
-```
-
----
-
-### `GET /result/{job_id}`
-Returns the final video URL and provenance details once complete.
-
-**Response:**
-```json
-{
-  "job_id": "uuid-here",
-  "status": "complete",
-  "video_url": "https://f005.backblazeb2.com/file/devfields/...",
-  "manifest_url": "https://f005.backblazeb2.com/file/devfields/.../manifest.json",
-  "sha256": "abc123...",
-  "models_used": {
-    "llm": "deepseek-v3.2",
-    "tts": "eleven_v3",
-    "video": "seedance-2-0"
-  },
-  "duration_seconds": 174,
-  "generated_at": "2026-06-24T12:00:00Z"
-}
-```
-
----
-
-### `GET /stream/{job_id}`
-Server-Sent Events endpoint. Streams pipeline progress to the frontend in real time.
-
----
-
-## Pipeline Modules — What Each One Does
-
-### `github_reader.py`
-- Accepts a GitHub URL
-- Uses GitHub API to fetch `README.md`, folder structure, and key source files (detects framework automatically)
-- Sends a condensed summary to the LLM: what this project is, what it does, what the tech stack is, what the key features are
-- Output: structured project context object
-
-### `app_browser.py`
-- Accepts the deployed app URL
-- Launches Playwright with `record_video=True` in headless Chromium
-- Navigates key flows: landing page → main feature → secondary feature → any auth/onboarding if present
-- Records everything as an MP4
-- Output: raw screen recording file path + list of visited routes
-
-### `script_writer.py`
-- Combines project context (from github_reader) + visited routes (from app_browser)
-- Calls DeepSeek-V3.2 via GMI `chat()` with a structured prompt
-- Output: a timestamped narration script in JSON format:
-```json
-[
-  { "time": 0, "text": "This is Devfields — it turns your GitHub repo into a demo video in minutes." },
-  { "time": 8, "text": "You paste two URLs. Your GitHub repo and your deployed app." },
-  ...
-]
-```
-
-### `voice_generator.py`
-- Takes the script text
-- Calls ElevenLabs `eleven_v3` via `genblaze-elevenlabs`
-- Outputs a human-sounding MP3 voiceover
-- Uploads to B2 immediately via `storage.py`
-
-### `video_assembler.py`
-- Takes: screen recording MP4 + voiceover MP3
-- Calls GMI Cloud video model via Genblaze Pipeline
-- Syncs audio to video, adds intro title card, outro with project name
-- Output: final assembled MP4
-
-### `storage.py`
-- Handles all B2 uploads via `genblaze-s3`
-- Uses `KeyStrategy.HIERARCHICAL` for organized bucket layout
-- Every asset gets a SHA-256 provenance manifest embedded and stored
-- Returns durable credential-free URLs
-
----
-
-## Environment Variables
-
-### Frontend (`.env.local`)
-```env
-NEXT_PUBLIC_BACKEND_URL=https://devfields-backend.railway.app
-```
-
-### Backend (`.env`)
-```env
-# GMI Cloud
-GMI_API_KEY=gmi-...
-
-# ElevenLabs
-ELEVENLABS_API_KEY=...
-
-# Backblaze B2
-B2_KEY_ID=...
-B2_APP_KEY=...
+Environment Variables
+Create backend/.env:
+GITHUB_TOKEN=            # GitHub personal access token — required
+GMI_CLOUD_API_KEY=       # Covers LLM, TTS, and image generation via GMI Cloud
 B2_BUCKET=devfields-media
+B2_PUBLIC_URL=           # e.g. https://f005.backblazeb2.com/file/devfields-media
 
-# GitHub (for private repo reading, optional)
-GITHUB_TOKEN=...
-```
+Backblaze B2 credentials themselves (key ID and application key) are picked up
+by Genblaze's S3StorageBackend.for_backblaze() — see the
+Genblaze docs for the exact
+environment variable names expected by your installed version.
+Create a .env.local at the repo root for the frontend:
 
----
+NEXT_PUBLIC_BACKEND_URL=https://your-railway-backend.up.railway.app
 
-## Genblaze Pipeline Code
 
-### Voice Generation
-```python
-from genblaze_core import Pipeline, Modality, ObjectStorageSink, KeyStrategy
-from genblaze_elevenlabs import ElevenLabsTTSProvider
-from genblaze_s3 import S3StorageBackend
-
-storage = ObjectStorageSink(
-    S3StorageBackend.for_backblaze("devfields-media"),
-    key_strategy=KeyStrategy.HIERARCHICAL,
-)
-
-result = (
-    Pipeline("devfields-voice")
-    .step(
-        ElevenLabsTTSProvider(output_dir="output/"),
-        model="eleven_v3",
-        prompt=script_text,
-        modality=Modality.AUDIO,
-        voice_id="JBFqnCBsd6RMkjVDRZzb",
-    )
-    .run(sink=storage)
-)
-
-voiceover_url = result.run.steps[0].assets[0].url
-```
-
-### Video Assembly
-```python
-from genblaze_gmicloud import GMICloudVideoProvider
-
-result = (
-    Pipeline("devfields-video")
-    .step(
-        GMICloudVideoProvider(),
-        model="seedance-2-0-260128",
-        prompt=f"App demo walkthrough with smooth transitions. {project_name} — {project_description}",
-        modality=Modality.VIDEO,
-        duration=180,
-        aspect_ratio="16:9",
-    )
-    .run(sink=storage, timeout=600)
-)
-
-video_url = result.run.steps[0].assets[0].url
-manifest_uri = result.manifest.manifest_uri
-sha256 = result.manifest.canonical_hash
-```
-
----
-
-## Dockerfile (Backend)
-
-```dockerfile
-FROM python:3.11-slim
-
-# Install Playwright system dependencies
-RUN apt-get update && apt-get install -y \
-    wget curl gnupg \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
-    libgbm1 libasound2 libxshmfence1 libgtk-3-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright and Chromium
-RUN playwright install chromium
-RUN playwright install-deps chromium
-
-COPY . .
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
----
-
-## Requirements
-
-```txt
-fastapi
-uvicorn
-playwright
-httpx
-python-dotenv
-pydantic
-
-# Genblaze
-genblaze-core
-genblaze-s3
-genblaze-gmicloud
-genblaze-elevenlabs
-```
-
----
-
-## UI Design Direction
-
-**Palette**
-- Background: `#080808`
-- Surface: `#111111`
-- Border: `#1e1e1e`
-- Accent: `#00FFB2` (teal — consistent with Arena brand)
-- Text primary: `#FFFFFF`
-- Text secondary: `#888888`
-
-**Typography**
-- Display: Geist (Vercel default, clean and technical)
-- Body: Inter
-- Monospace: Geist Mono (for URLs, hashes, model names)
-
-**Key UI Moments**
-- Landing page: Two URL inputs, dead center, nothing else. The inputs are the entire product.
-- Progress page: Vertical pipeline with animated step indicators. Each step lights up as it completes.
-- Result page: Full-width video player. Download button. Provenance card below showing models used, SHA-256, B2 URL.
-
-**Signature element:** The pipeline progress visualization — each step is a node in a vertical chain. Active step pulses with the teal accent. Completed steps show a checkmark. It looks like watching the machine think.
-
----
-
-## Judging Criteria Alignment
-
-| Criterion | How Devfields Scores |
-|---|---|
-| **Real-World Utility** | Every hackathon builder is the user. The problem is personal and universal. |
-| **Production Readiness** | End-to-end pipeline with error handling, job tracking, and durable storage. Not a demo of a demo. |
-| **B2 Storage & Data Orchestration** | All assets, manifests, audio, and video stored on B2. Provenance embedded in every MP4. |
-| **Use of Genblaze** | Genblaze orchestrates ElevenLabs TTS + GMI video in a multi-step chained Pipeline with provenance by default. |
-
----
-
-## Hackathon Submission Checklist
-
-- [ ] Working app URL (Vercel frontend + Railway backend)
-- [ ] GitHub repo (public, with setup instructions)
-- [ ] Providers and models list: DeepSeek-V3.2, ElevenLabs eleven_v3, GMI Cloud Seedance
-- [ ] B2 and Genblaze usage explanation
-- [ ] 3-minute demo video (generated by Devfields itself — meta points guaranteed)
-
----
-
-## Timeline (40 days to August 4)
-
-| Week | Focus |
-|---|---|
-| Week 1 (Jun 24–30) | H0 hackathon deadline first. Start Devfields repo + environment setup. |
-| Week 2 (Jul 1–7) | Backend pipeline: github_reader + app_browser working end to end |
-| Week 3 (Jul 8–14) | script_writer + voice_generator + Genblaze integration |
-| Week 4 (Jul 15–21) | video_assembler + B2 storage + full pipeline connected |
-| Week 5 (Jul 22–28) | Frontend: landing, progress, result pages |
-| Week 6 (Jul 29–Aug 3) | Polish, testing, demo video, submission |
-
----
-
-*Devfields — built by a builder, for builders.*
+Deployment
+Frontend — deploys to Vercel from the repo root, unchanged
+Backend — deploys to Railway as a separate service, with the service's
+root directory set to /backend in Railway's settings. Uses the included
+Dockerfile (Playwright + Chromium + FFmpeg) and railway.json
+Segment-Based Architecture
+Every navigation step during recording is tracked with start/end timestamps.
+Narration, voiceover, and video clips are generated per segment rather than as
+one continuous file, and every segment is stored individually on B2. This is
+the foundation for targeted editing — regenerating a single segment's clip or
+voiceover without touching the rest of the video — without needing to re-run
+the AI navigation or re-record the whole app.
+Demo Video
+[Link to demo video — add before submission]
+Built With
+Next.js · FastAPI · Playwright · FFmpeg · Genblaze · GMI Cloud · DeepSeek-V3 ·
+ElevenLabs · Seedream · Backblaze B2
