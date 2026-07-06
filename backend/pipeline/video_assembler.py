@@ -7,7 +7,7 @@ import asyncio
 import os
 from typing import Optional
 
-from pipeline.segment_tools import get_duration, split_clip, pad_video_to_duration
+from pipeline.segment_tool import get_duration, split_clip, pad_video_to_duration
 
 
 async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> str:
