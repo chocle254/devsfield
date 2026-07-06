@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-instrument), Georgia, serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -32,39 +33,44 @@
 }
 
 :root {
-  --radius: 0.625rem;
+  --radius: 1rem;
 
-  /* Dark technical theme */
-  --background: oklch(0.16 0.004 285);
-  --foreground: oklch(0.97 0.002 285);
+  /* Obsidian canvas — deliberately darker/richer than flat #0a0a0b */
+  --background: oklch(0.12 0.006 285);
+  --foreground: oklch(0.96 0.006 85); /* warm off-white, not pure white */
 
-  --card: oklch(0.2 0.005 285);
-  --card-foreground: oklch(0.97 0.002 285);
+  /* Glass surface — translucent, brightened by backdrop-blur in use */
+  --card: oklch(0.22 0.01 285 / 0.55);
+  --card-foreground: oklch(0.96 0.006 85);
 
-  --popover: oklch(0.2 0.005 285);
-  --popover-foreground: oklch(0.97 0.002 285);
+  --popover: oklch(0.18 0.008 285 / 0.9);
+  --popover-foreground: oklch(0.96 0.006 85);
 
-  /* Emerald accent */
-  --primary: oklch(0.78 0.16 162);
-  --primary-foreground: oklch(0.18 0.02 162);
+  /* Aurora mint — primary accent */
+  --primary: oklch(0.83 0.14 175);
+  --primary-foreground: oklch(0.16 0.02 175);
 
-  --secondary: oklch(0.26 0.006 285);
-  --secondary-foreground: oklch(0.97 0.002 285);
+  /* Aurora violet — secondary light source, keeps this from reading as
+     "one flat accent on black" */
+  --accent-violet: oklch(0.68 0.17 300);
 
-  --muted: oklch(0.26 0.006 285);
-  --muted-foreground: oklch(0.66 0.008 285);
+  --secondary: oklch(0.24 0.012 285 / 0.6);
+  --secondary-foreground: oklch(0.96 0.006 85);
 
-  --accent: oklch(0.26 0.006 285);
-  --accent-foreground: oklch(0.97 0.002 285);
+  --muted: oklch(0.24 0.012 285 / 0.5);
+  --muted-foreground: oklch(0.68 0.012 260);
 
-  --destructive: oklch(0.62 0.21 25);
-  --destructive-foreground: oklch(0.98 0.002 285);
+  --accent: oklch(0.26 0.014 285 / 0.6);
+  --accent-foreground: oklch(0.96 0.006 85);
 
-  --success: oklch(0.78 0.16 162);
+  --destructive: oklch(0.64 0.21 25);
+  --destructive-foreground: oklch(0.98 0.006 85);
 
-  --border: oklch(0.28 0.006 285);
-  --input: oklch(0.24 0.006 285);
-  --ring: oklch(0.78 0.16 162);
+  --success: oklch(0.83 0.14 175);
+
+  --border: oklch(1 0 0 / 0.08);
+  --input: oklch(1 0 0 / 0.06);
+  --ring: oklch(0.83 0.14 175 / 0.5);
 }
 
 @layer base {
@@ -78,83 +84,117 @@
   }
 }
 
-@keyframes pulse-ring {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 45%, transparent);
-  }
-  70% {
-    box-shadow: 0 0 0 10px color-mix(in oklch, var(--primary) 0%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 0%, transparent);
-  }
+/* ---------------------------------------------------------------------
+   Aurora field — two soft, large, blurred light sources behind the glass.
+   This is what actually makes glassmorphism read as depth rather than
+   grey semi-transparent boxes: glass needs something colorful and
+   diffuse behind it to refract.
+--------------------------------------------------------------------- */
+.aurora-field {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-@keyframes dash-flow {
-  to {
-    stroke-dashoffset: -16;
-  }
+.aurora-field::before,
+.aurora-field::after {
+  content: "";
+  position: absolute;
+  width: 60vw;
+  height: 60vw;
+  max-width: 720px;
+  max-height: 720px;
+  border-radius: 50%;
+  filter: blur(110px);
+  opacity: 0.35;
+  will-change: transform;
 }
 
-@keyframes shimmer {
-  100% {
-    transform: translateX(100%);
-  }
+.aurora-field::before {
+  top: -10%;
+  left: -8%;
+  background: radial-gradient(circle, var(--primary) 0%, transparent 70%);
+  animation: aurora-drift-a 26s ease-in-out infinite;
 }
 
-@keyframes grid-fade {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 0.7;
-  }
+.aurora-field::after {
+  bottom: -15%;
+  right: -10%;
+  background: radial-gradient(circle, var(--accent-violet) 0%, transparent 70%);
+  animation: aurora-drift-b 32s ease-in-out infinite;
 }
 
-.animate-pulse-ring {
-  animation: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+@keyframes aurora-drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(4%, 6%) scale(1.08); }
 }
 
-.bg-grid {
-  background-image:
-    linear-gradient(to right, color-mix(in oklch, var(--border) 60%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in oklch, var(--border) 60%, transparent) 1px, transparent 1px);
-  background-size: 40px 40px;
+@keyframes aurora-drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-5%, -4%) scale(1.05); }
 }
 
-/* Presenter picture-in-picture: subtle "talking head" motion + speaking ring */
-@keyframes presenter-bob {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-  50% {
-    transform: translateY(-2px) scale(1.012);
-  }
+/* ---------------------------------------------------------------------
+   Glass panel — the signature surface. Real frosted glass: backdrop
+   blur + saturation boost, translucent fill, and a top-edge highlight
+   that fakes a light source catching the glass rim.
+--------------------------------------------------------------------- */
+.glass-panel {
+  position: relative;
+  background: var(--card);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 1px 0 0 oklch(1 0 0 / 0.08) inset,
+    0 24px 60px -20px oklch(0.05 0 0 / 0.6);
 }
 
-@keyframes presenter-ring {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 55%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 5px color-mix(in oklch, var(--primary) 0%, transparent);
-  }
+/* The "lens" — hero input panel gets a slow rotating gradient border,
+   evoking a camera aperture. This is the one signature element; kept
+   subtle and slow so it reads as alive, not decorated. */
+.glass-lens {
+  position: relative;
+  isolation: isolate;
 }
 
-.presenter-bob {
-  animation: presenter-bob 2.4s ease-in-out infinite;
+.glass-lens::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--lens-angle, 0deg),
+    var(--primary),
+    var(--accent-violet),
+    var(--primary)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.5;
+  animation: lens-rotate 12s linear infinite;
+  z-index: -1;
 }
 
-.presenter-ring {
-  animation: presenter-ring 1.6s ease-out infinite;
+@keyframes lens-rotate {
+  to { --lens-angle: 360deg; }
+}
+
+@property --lens-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .presenter-bob,
-  .presenter-ring {
+  .aurora-field::before,
+  .aurora-field::after,
+  .glass-lens::before {
     animation: none;
   }
 }
