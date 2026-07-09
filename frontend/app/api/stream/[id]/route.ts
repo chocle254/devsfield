@@ -1,45 +1,32 @@
-import { getRun } from "@/lib/store"
-
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+  const backendUrl = process.env.BACKEND_URL
 
-  const encoder = new TextEncoder()
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
-      }
+  const sseError = (message: string) =>
+    new Response(`data: ${JSON.stringify({ error: message })}\n\n`, {
+      headers: { "Content-Type": "text/event-stream" },
+    })
 
-      let closed = false
-      const interval = setInterval(() => {
-        const run = getRun(id)
-        if (!run) {
-          send({ error: "not_found" })
-          clearInterval(interval)
-          if (!closed) controller.close()
-          closed = true
-          return
-        }
-        send({
-          id: run.id,
-          status: run.status,
-          steps: run.steps,
-          repoUrl: run.repoUrl,
-          appUrl: run.appUrl,
-        })
-        if (run.status === "done" || run.status === "error") {
-          clearInterval(interval)
-          if (!closed) controller.close()
-          closed = true
-        }
-      }, 350)
-    },
-  })
+  if (!backendUrl) {
+    return sseError("Server misconfigured: BACKEND_URL is not set.")
+  }
 
-  return new Response(stream, {
+  let backendRes: Response
+  try {
+    backendRes = await fetch(`${backendUrl}/stream/${id}`, { cache: "no-store" })
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "unknown error"
+    return sseError(`Could not reach backend: ${message}`)
+  }
+
+  if (!backendRes.ok || !backendRes.body) {
+    return sseError(`Backend returned ${backendRes.status}`)
+  }
+
+  return new Response(backendRes.body, {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
