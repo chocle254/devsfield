@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic"
 
 const DURATION_MIN = 60
 const DURATION_MAX = 300
-const ALLOWED_TONES = ["pitch", "demo", "technical"] as const
+const ALLOWED_TONES = ["pitch", "demo", "technical", "pitch_demo"] as const
 
 function isLikelyUrl(v: string) {
   try {
@@ -63,7 +63,7 @@ export async function POST(req: Request) {
   // field (pitch_demo -> pitch, demo -> demo) until the UI is updated.
   let tone = body.options?.tone
   if (!tone && body.options?.format) {
-    tone = body.options.format === "pitch_demo" ? "pitch" : "demo"
+    tone = body.options.format === "pitch_demo" ? "pitch_demo" : "demo"
   }
   if (!tone || !(ALLOWED_TONES as readonly string[]).includes(tone)) {
     tone = "pitch"
