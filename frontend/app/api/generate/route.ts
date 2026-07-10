@@ -24,6 +24,8 @@ type RequestBody = {
     tone?: string
     /** @deprecated legacy field from the old mock form, mapped to `tone` below */
     format?: string
+    /** optional demo-account login for apps behind authentication */
+    credentials?: { username?: string; password?: string }
   }
 }
 
@@ -69,6 +71,15 @@ export async function POST(req: Request) {
     tone = "pitch"
   }
 
+  // Optional demo login: only forwarded when both fields are present.
+  // Passed straight through to the backend for the recording session —
+  // never logged or persisted here.
+  const rawCreds = body.options?.credentials
+  const credentials =
+    rawCreds?.username?.trim() && rawCreds?.password
+      ? { username: rawCreds.username.trim(), password: rawCreds.password }
+      : undefined
+
   let backendRes: Response
   try {
     backendRes = await fetch(`${backendUrl}/generate`, {
@@ -79,6 +90,7 @@ export async function POST(req: Request) {
         app_url: appUrl,
         video_length,
         tone,
+        credentials,
       }),
     })
   } catch (e: unknown) {

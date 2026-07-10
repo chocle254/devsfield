@@ -7,7 +7,7 @@ import asyncio
 import os
 from typing import Optional
 
-from pipeline.segment_tool import get_duration, split_clip, pad_video_to_duration
+from pipeline.segment_tool import get_duration, split_clip, fit_video_to_duration
 
 
 async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> str:
@@ -76,7 +76,7 @@ async def assemble(
 
         audio_duration = await get_duration(audio_path)
         padded_clip_path = f"/tmp/paddedclip_{job_id}_seg{seg_id}.mp4"
-        await pad_video_to_duration(raw_clip_path, audio_duration, padded_clip_path)
+        await fit_video_to_duration(raw_clip_path, audio_duration, padded_clip_path)
 
         merged_path = f"/tmp/mergedseg_{job_id}_seg{seg_id}.mp4"
         await _merge_segment(padded_clip_path, audio_path, merged_path)

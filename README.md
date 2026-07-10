@@ -25,22 +25,52 @@ a finished, narrated MP4.
 
 Devfields runs a 7-step pipeline for every job:
 
-1. **Read the repo** — fetches the README, file tree, framework, and key source
-   files via the GitHub API
-2. **Navigate the live app with AI** — a Playwright-controlled headless browser
-   reads the page's accessibility tree at each step and asks an LLM what to click
-   next, based on what the README says the app actually does. This produces a
-   meaningful recording of real features instead of blind clicking.
-3. **Write a segmented narration script** — one narration line generated per
-   navigation segment, so the voiceover is synced to what's actually on screen
+1. **Read the repo & plan the demo** — fetches the README, file tree, framework,
+   and key source files via the GitHub API, then detects the app's real routes
+   and whether it uses authentication. An LLM studies all of it and produces a
+   prioritized, **time-budgeted shot list** ("beats") that fits the requested
+   video length — the AI understands your app before it ever opens a browser.
+2. **Record the live app with AI** — a Playwright-controlled headless browser
+   follows the plan beat by beat. If the app is behind a login and you provided
+   a demo account, the AI signs in first (the login itself is kept out of the
+   final video). Each segment records an *observation* of what was actually
+   visible on screen.
+3. **Write a segmented narration script** — one narration line per segment,
+   grounded in that segment's real on-screen observation and word-fitted to the
+   segment's exact duration, written in plain spoken language (no AI buzzwords).
 4. **Generate a title card** — an AI-generated branded image for the video open
-5. **Generate the voiceover** — one voice clip per segment
-6. **Composite the video** — each segment's screen clip is padded to match its
-   voiceover length, merged with FFmpeg, and concatenated into a final MP4
+5. **Generate the voiceover** — one voice clip per segment, generated in parallel
+6. **Composite the video** — each segment's screen clip is fitted to its
+   voiceover length (padded, gently sped up, or trimmed), merged with FFmpeg,
+   and concatenated into a final MP4
 7. **Upload to Backblaze B2** — the final video, every individual segment (clip +
    voice), a segment manifest, and a SHA-256 provenance manifest are all stored
 
 Progress streams live to the frontend via Server-Sent Events.
+
+### How timing works (3-minute vs 5-minute videos)
+
+The requested video length is a **hard budget**, not a hope:
+
+- The planner allocates seconds per beat so the total fits the target length
+  (minus a few seconds reserved for the title card).
+- Beats are ordered by priority. If pages load slowly — bad network, cold
+  serverless starts — the browser drops the *lowest-priority* beats instead of
+  blowing the budget. Your best feature always makes the cut.
+- **Loading time never appears in the final video.** Each segment's clock starts
+  only after the page has settled, so spinners and blank screens fall between
+  segments and are cut during assembly.
+- Narration is written to fit each segment's real recorded duration (~145 words
+  per minute), so the voice never rushes or trails off into silence.
+
+### Apps behind a login
+
+If your app requires authentication, toggle **Demo login** in the UI (or pass
+`credentials` to the API) with a throwaway demo account. The AI detects the
+login form, signs in before recording the gated features, and keeps the typing
+of credentials out of the final video. Credentials are used once per job and
+never stored or uploaded. If auth is detected but no credentials are provided,
+the planner sticks to publicly accessible pages.
 
 ---
 
@@ -164,6 +194,33 @@ Create a .env.local at the repo root for the frontend:
 
 NEXT_PUBLIC_BACKEND_URL=https://your-railway-backend.up.railway.app
 
+
+API Reference
+
+Everything the UI does is available as a plain HTTP API:
+
+```bash
+# Start a job
+curl -X POST https://your-backend/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "github_url": "https://github.com/you/your-app",
+    "app_url": "https://your-app.vercel.app",
+    "video_length": 180,
+    "tone": "pitch",
+    "credentials": { "username": "demo@example.com", "password": "demo1234" }
+  }'
+# -> { "job_id": "...", "status": "queued" }
+
+# Poll status            GET /status/{job_id}
+# Stream progress (SSE)  GET /stream/{job_id}
+# Fetch the result       GET /result/{job_id}
+```
+
+- `video_length` — 60 to 300 seconds. This is a hard cap (see "How timing works").
+- `tone` — `pitch`, `pitch_demo`, `demo`, or `technical`.
+- `credentials` — optional; only needed for apps behind a login. Use a
+  throwaway demo account.
 
 Deployment
 Frontend — deploys to Vercel from the repo root, unchanged

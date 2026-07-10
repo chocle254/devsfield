@@ -93,6 +93,15 @@ async def read_repo(github_url: str) -> dict:
                 )
             raise
         
+        # Detect user-facing routes from the file tree (Next.js app/pages
+        # router, plain React router files). These tell the demo planner
+        # which pages actually exist without guessing.
+        detected_routes = _detect_routes(file_paths)
+
+        # Detect whether the app has authentication, so the browser knows
+        # to expect (and handle) a login flow.
+        auth_info = _detect_auth(file_paths, readme)
+
         # Fetch key source files
         key_file_priorities = [
             "README.md", "main.py", "app/page.tsx", "src/App.tsx",
@@ -125,4 +134,75 @@ async def read_repo(github_url: str) -> dict:
         "key_files": key_files,
         "stars": stars,
         "language": language,
+        "detected_routes": detected_routes,
+        "has_auth": auth_info["has_auth"],
+        "auth_hints": auth_info["hints"],
     }
+
+
+def _detect_routes(file_paths: list[str]) -> list[str]:
+    """Infer user-facing routes from the repository file tree."""
+    routes: set[str] = set()
+
+    for path in file_paths:
+        route = None
+
+        # Next.js App Router: app/**/page.{tsx,jsx,ts,js}
+        for prefix in ("app/", "src/app/", "frontend/app/"):
+            if path.startswith(prefix) and path.rsplit("/", 1)[-1].startswith("page."):
+                sub = path[len(prefix):]
+                parts = sub.split("/")[:-1]  # drop page.tsx
+                # skip route groups (parens) and api routes
+                parts = [p for p in parts if not p.startswith("(")]
+                if parts and parts[0] == "api":
+                    break
+                route = "/" + "/".join(parts)
+                break
+
+        # Next.js Pages Router: pages/**/*.{tsx,jsx,ts,js}
+        if route is None:
+            for prefix in ("pages/", "src/pages/"):
+                if path.startswith(prefix) and path.endswith((".tsx", ".jsx", ".ts", ".js")):
+                    sub = path[len(prefix):].rsplit(".", 1)[0]
+                    if sub.startswith(("api/", "_")):
+                        break
+                    route = "/" + ("" if sub == "index" else sub)
+                    break
+
+        if route is not None:
+            # skip fully dynamic routes ([id]) — can't navigate blind
+            if "[" not in route:
+                routes.add(route or "/")
+
+    ordered = sorted(routes, key=lambda r: (r != "/", r.count("/"), r))
+    return ordered[:20]
+
+
+def _detect_auth(file_paths: list[str], readme: str) -> dict:
+    """Heuristically detect whether the app has an auth/login flow."""
+    hints: list[str] = []
+    joined = "\n".join(file_paths).lower()
+
+    library_markers = {
+        "next-auth": "next-auth", "better-auth": "better-auth",
+        "@clerk": "Clerk", "supabase": "Supabase Auth",
+        "firebase": "Firebase Auth", "auth0": "Auth0",
+        "lucia": "Lucia", "passport": "Passport",
+    }
+    for marker, label in library_markers.items():
+        if marker in joined:
+            hints.append(label)
+
+    route_markers = ["login", "signin", "sign-in", "signup", "sign-up",
+                     "auth/", "/auth", "register"]
+    for marker in route_markers:
+        if marker in joined:
+            hints.append(f"route:{marker}")
+
+    readme_lower = (readme or "").lower()
+    for phrase in ("log in", "login", "sign in", "sign up", "authentication"):
+        if phrase in readme_lower:
+            hints.append(f"readme:{phrase}")
+            break
+
+    return {"has_auth": len(hints) > 0, "hints": hints[:6]}

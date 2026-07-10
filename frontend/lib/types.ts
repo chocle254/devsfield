@@ -18,12 +18,20 @@ export interface PresenterConfig {
   photoUrl?: string
 }
 
+export interface DemoCredentials {
+  /** demo-account email or username the AI uses to sign in during recording */
+  username: string
+  password: string
+}
+
 export interface VideoOptions {
   /** hard cap on the produced video length, in seconds (<= 300) */
   maxDurationSec: number
   /** demo walkthrough only, or an investor-style pitch followed by the demo */
   format: VideoFormat
   presenter: PresenterConfig
+  /** optional login for apps behind authentication — used once, never stored */
+  credentials?: DemoCredentials
 }
 
 export type StepStatus = "pending" | "active" | "done" | "error"
