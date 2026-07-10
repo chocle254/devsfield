@@ -4,18 +4,33 @@ from typing import Optional
 
 from models import GenerateRequest
 from jobs import set_step, complete_step, fail_job, complete_job, add_tmp_file, get_tmp_files
-from . import github_reader, app_browser, script_writer, image_generator
+from . import github_reader, demo_planner, app_browser, script_writer, image_generator
 from . import voice_generator, video_assembler, storage
 
 
 async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
     try:
-        await set_step(job_id, "github_reader", "Reading your repository...")
+        credentials = None
+        if request.credentials is not None:
+            credentials = {
+                "username": request.credentials.username,
+                "password": request.credentials.password,
+            }
+
+        await set_step(job_id, "github_reader",
+                       "Reading your repository and planning the demo...")
         context = await github_reader.read_repo(request.github_url)
+        # Repo-aware plan: which features to show, in what order, with a
+        # per-beat time budget that fits the requested video length.
+        plan = await demo_planner.plan_demo(
+            context, request.video_length, has_credentials=credentials is not None)
         await complete_step(job_id, "github_reader")
 
         await set_step(job_id, "app_browser", "Recording your live app...")
-        recording = await app_browser.record_app(request.app_url, context)
+        recording = await app_browser.record_app(
+            request.app_url, context,
+            demo_plan=plan, credentials=credentials,
+            video_length=request.video_length)
         await add_tmp_file(job_id, recording["video_path"])
         await complete_step(job_id, "app_browser")
 

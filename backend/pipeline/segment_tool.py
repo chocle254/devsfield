@@ -54,3 +54,45 @@ async def pad_video_to_duration(video_path: str, target_duration: float,
     if proc.returncode != 0:
         raise RuntimeError(f"Video padding failed: {stderr.decode()}")
     return output_path
+
+
+async def fit_video_to_duration(video_path: str, target_duration: float,
+                                output_path: str) -> str:
+    """
+    Make a clip exactly target_duration seconds long, choosing the least
+    destructive strategy:
+    - shorter than target  -> freeze the last frame (pad)
+    - up to 30% too long   -> speed up slightly (imperceptible on screen
+                              recordings, keeps every action visible)
+    - way too long         -> trim the tail
+    """
+    current = await get_duration(video_path)
+
+    if current <= target_duration + 0.05:
+        return await pad_video_to_duration(video_path, target_duration,
+                                           output_path)
+
+    ratio = current / target_duration
+    if ratio <= 1.3:
+        # Gentle speed-up: setpts compresses timestamps by 1/ratio
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-vf", f"setpts=PTS/{ratio:.5f}",
+            "-c:v", "libx264", "-an",
+            output_path, "-y",
+        ]
+    else:
+        # Too much dead time — keep the first target_duration seconds
+        cmd = [
+            "ffmpeg", "-i", video_path,
+            "-t", str(target_duration),
+            "-c:v", "libx264", "-an",
+            output_path, "-y",
+        ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Video fitting failed: {stderr.decode()}")
+    return output_path

@@ -2,12 +2,20 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
+class AppCredentials(BaseModel):
+    """Optional demo-account login for apps behind authentication.
+    Used ONLY during the recording session; never stored or uploaded."""
+    username: str
+    password: str
+
+
 class GenerateRequest(BaseModel):
     """Request to generate a demo video."""
     github_url: str
     app_url: str
     video_length: int = Field(default=180, ge=60, le=300)
-    tone: str = Field(default="pitch")  # "pitch", "demo", or "technical"
+    tone: str = Field(default="pitch")  # "pitch", "pitch_demo", "demo", or "technical"
+    credentials: Optional[AppCredentials] = None
 
 
 class JobStatus(BaseModel):

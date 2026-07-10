@@ -20,6 +20,9 @@ export function UrlInputForm() {
   const [presenterOn, setPresenterOn] = useState(false)
   const [presenterName, setPresenterName] = useState("")
   const [presenterPhoto, setPresenterPhoto] = useState<string | null>(null)
+  const [loginOn, setLoginOn] = useState(false)
+  const [loginUsername, setLoginUsername] = useState("")
+  const [loginPassword, setLoginPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -43,6 +46,10 @@ export function UrlInputForm() {
               name: presenterName || undefined,
               photoUrl: presenterOn ? presenterPhoto ?? undefined : undefined,
             },
+            credentials:
+              loginOn && loginUsername && loginPassword
+                ? { username: loginUsername, password: loginPassword }
+                : undefined,
           },
         }),
       })
@@ -131,6 +138,60 @@ export function UrlInputForm() {
               Pitch + demo
             </SegButton>
           </div>
+        </div>
+
+        {/* Demo login */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setLoginOn((v) => !v)}
+            className="flex w-full items-center justify-between gap-3 text-left"
+            aria-pressed={loginOn}
+          >
+            <span className="flex flex-col">
+              <span className="text-sm font-medium text-foreground">Demo login</span>
+              <span className="text-xs text-muted-foreground">
+                App behind a login? Add a demo account so the AI can sign in
+              </span>
+            </span>
+            <span
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                loginOn ? "bg-primary" : "bg-input"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-4 w-4 rounded-full bg-background transition-transform ${
+                  loginOn ? "translate-x-4" : "translate-x-0.5"
+                }`}
+              />
+            </span>
+          </button>
+
+          {loginOn ? (
+            <div className="mt-3 space-y-2">
+              <input
+                type="text"
+                autoComplete="off"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                placeholder="Demo email or username"
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
+              />
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Demo password"
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Use a throwaway demo account. Credentials are used once during
+                recording and never stored. The login itself is kept out of the
+                final video.
+              </p>
+            </div>
+          ) : null}
         </div>
 
         {/* Presenter */}
