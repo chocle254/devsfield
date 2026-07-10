@@ -48,7 +48,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
 
         await set_step(job_id, "voice_generator", "Generating voiceover per segment...")
         voiced_segments = await voice_generator.generate_segment_voices(
-            script_segments, job_id)
+            script_segments, job_id, tone=request.tone)
         for seg in voiced_segments:
             await add_tmp_file(job_id, seg["audio_path"])
         await complete_step(job_id, "voice_generator")

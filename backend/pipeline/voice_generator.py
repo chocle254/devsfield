@@ -16,6 +16,22 @@ from genblaze_gmicloud import GMICloudAudioProvider
 # How many TTS jobs to run at once
 MAX_CONCURRENT = 3
 
+# Curated voice per tone — ElevenLabs voice ids from the provider's
+# curated catalog (genblaze_gmicloud.models.voices). Each tone gets the
+# delivery style that suits it; the whole video always uses ONE voice so
+# the narration sounds like a single person presenting.
+#   pitch      -> Adam   (deep, announcer)     : confident investor pitch
+#   pitch_demo -> George (warm, narration)     : warm pitch into a demo
+#   demo       -> Sarah  (conversational)      : friendly walkthrough
+#   technical  -> Rachel (clear, narration)    : precise, easy to follow
+TONE_VOICES: dict[str, str] = {
+    "pitch": "pNInz6obpgDQGcFmaJgB",       # Adam
+    "pitch_demo": "JBFqnCBsd6RMkjVDRZzb",  # George
+    "demo": "EXAVITQu4vr4xnSDxMaL",        # Sarah
+    "technical": "21m00Tcm4TlvDq8ikWAM",   # Rachel
+}
+DEFAULT_VOICE = TONE_VOICES["pitch"]
+
 
 def _prep_text(text: str) -> str:
     """Light cleanup so the TTS delivery sounds natural."""
@@ -31,7 +47,7 @@ def _prep_text(text: str) -> str:
 
 
 def _generate_one(gmi_api_key: str, job_id: str, segment_id: int,
-                  text: str) -> str:
+                  text: str, voice_id: str) -> str:
     """Blocking Genblaze pipeline call — run inside a thread."""
     run, _manifest = (
         Pipeline(f"devfields-voice-{job_id}-seg{segment_id}")
@@ -39,6 +55,7 @@ def _generate_one(gmi_api_key: str, job_id: str, segment_id: int,
             GMICloudAudioProvider(api_key=gmi_api_key),
             model="elevenlabs-tts-v3",
             prompt=text,
+            voice=voice_id,
             modality=Modality.AUDIO,
         )
         .run(timeout=90)
@@ -51,15 +68,18 @@ def _generate_one(gmi_api_key: str, job_id: str, segment_id: int,
 
 
 async def generate_segment_voices(script_segments: list[dict],
-                                  job_id: str) -> list[dict]:
+                                  job_id: str,
+                                  tone: str = "pitch") -> list[dict]:
     """
     For each segment (which has a "text" field), generate a voice clip.
     Returns the same list with "audio_path" added to each segment.
+    The narration voice is chosen once per job based on the video tone.
     """
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     if not gmi_api_key:
         raise ValueError("GMI_CLOUD_API_KEY not set")
 
+    voice_id = TONE_VOICES.get(tone, DEFAULT_VOICE)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
     async def process(seg: dict) -> dict:
@@ -70,7 +90,7 @@ async def generate_segment_voices(script_segments: list[dict],
             # The Genblaze Pipeline API is synchronous; keep the event loop
             # free by running it in a worker thread.
             asset_url = await asyncio.to_thread(
-                _generate_one, gmi_api_key, job_id, segment_id, text)
+                _generate_one, gmi_api_key, job_id, segment_id, text, voice_id)
 
             audio_path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
             async with httpx.AsyncClient(timeout=60.0) as client:
