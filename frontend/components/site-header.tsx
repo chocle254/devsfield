@@ -9,6 +9,12 @@ export function SiteHeader() {
           <span className="font-mono text-sm font-semibold tracking-tight">devfields</span>
         </Link>
         <nav className="flex items-center gap-1 text-sm">
+          <Link
+            href="/docs"
+            className="rounded-md px-3 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            API Docs
+          </Link>
           <a
             href="https://github.com"
             target="_blank"
