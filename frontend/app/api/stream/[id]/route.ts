@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic"
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? process.env.BACKEND_URL
+  const backendUrl = process.env.BACKEND_URL
 
   const sseError = (message: string) =>
     new Response(`data: ${JSON.stringify({ error: message })}\n\n`, {
@@ -11,7 +11,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     })
 
   if (!backendUrl) {
-    return sseError("Server misconfigured: NEXT_PUBLIC_BACKEND_URL is not set.")
+    return sseError("Server misconfigured: BACKEND_URL is not set.")
   }
 
   let backendRes: Response

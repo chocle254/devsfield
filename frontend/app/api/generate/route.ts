@@ -28,10 +28,10 @@ type RequestBody = {
 }
 
 export async function POST(req: Request) {
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? process.env.BACKEND_URL
+  const backendUrl = process.env.BACKEND_URL
   if (!backendUrl) {
     return NextResponse.json(
-      { error: "Server misconfigured: NEXT_PUBLIC_BACKEND_URL is not set." },
+      { error: "Server misconfigured: BACKEND_URL is not set." },
       { status: 500 },
     )
   }
