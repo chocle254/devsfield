@@ -1,140 +1,57 @@
-import type { StepDef, VideoFormat } from "./types"
+import type { StepDef } from "./types"
 
+/**
+ * The 7 pipeline steps, matching the backend orchestrator exactly.
+ * `id` maps 1:1 to the step keys the backend emits over SSE
+ * (`current_step` / `steps_completed`).
+ */
 export const STEP_DEFS: StepDef[] = [
   {
-    id: "ingest",
-    title: "Ingest repository",
-    description: "Clone metadata, read README, package manifest, and file tree.",
+    id: "github_reader",
+    title: "Read the repo",
+    description: "Fetch the README, file tree, framework, and key source files via the GitHub API.",
     provider: "GitHub",
-    duration: 2200,
   },
   {
-    id: "analyze",
-    title: "Analyze project",
-    description: "Detect stack, entry points, and the story worth telling.",
+    id: "app_browser",
+    title: "Navigate the live app",
+    description:
+      "An AI-guided headless browser reads the accessibility tree and decides what to click, recording real features.",
     provider: "GMI Cloud",
-    duration: 3200,
   },
   {
-    id: "script",
-    title: "Write narration script",
-    description: "Generate a tight 3-minute walkthrough script with scene beats.",
+    id: "script_writer",
+    title: "Write the narration",
+    description: "Generate one narration line per navigation segment, synced to what's on screen.",
     provider: "GMI Cloud",
-    duration: 3600,
   },
   {
-    id: "voiceover",
-    title: "Synthesize voiceover",
-    description: "Render natural narration audio from the script.",
+    id: "image_generator",
+    title: "Generate title card",
+    description: "Create a branded AI title-card image for the video open.",
+    provider: "GMI Cloud",
+  },
+  {
+    id: "voice_generator",
+    title: "Generate the voiceover",
+    description: "Synthesize one ElevenLabs voice clip per segment via Genblaze.",
     provider: "ElevenLabs",
-    duration: 3000,
   },
   {
-    id: "capture",
-    title: "Capture app walkthrough",
-    description: "Drive the live deployment and record key UI flows as frames.",
+    id: "video_assembler",
+    title: "Composite the video",
+    description: "FFmpeg pads each clip to its voiceover, merges audio, and concatenates the final MP4.",
     provider: "Devfields",
-    duration: 3400,
   },
   {
-    id: "compose",
-    title: "Compose demo video",
-    description: "Align scenes to narration, add captions, and render the cut.",
-    provider: "Devfields",
-    duration: 4200,
-  },
-  {
-    id: "publish",
-    title: "Publish + sign assets",
-    description: "Upload every artifact to Backblaze B2 with a provenance manifest.",
+    id: "storage",
+    title: "Upload to Backblaze B2",
+    description: "Store the final video, every segment, the segment manifest, and a SHA-256 provenance manifest.",
     provider: "Backblaze B2",
-    duration: 2400,
   },
 ]
 
-/** Optional step, inserted before compose only when a presenter cam is requested. */
-export const PRESENTER_STEP: StepDef = {
-  id: "presenter",
-  title: "Animate presenter",
-  description: "Turn the uploaded photo into a lip-synced talking head, timed to the voiceover.",
-  provider: "Devfields",
-  duration: 3000,
-}
-
-const ALL_STEP_DEFS: StepDef[] = [...STEP_DEFS, PRESENTER_STEP]
-
-/** Lookup so any consumer can resolve a step definition by id regardless of order. */
+/** Lookup so any consumer can resolve a step definition by its backend id. */
 export const STEP_DEF_BY_ID: Record<string, StepDef> = Object.fromEntries(
-  ALL_STEP_DEFS.map((d) => [d.id, d]),
+  STEP_DEFS.map((d) => [d.id, d]),
 )
-
-/** Build the ordered pipeline for a given set of options. */
-export function buildPipeline(opts: { presenter: boolean }): StepDef[] {
-  const steps = [...STEP_DEFS]
-  if (opts.presenter) {
-    const idx = steps.findIndex((s) => s.id === "compose")
-    steps.splice(idx, 0, PRESENTER_STEP)
-  }
-  return steps
-}
-
-export function logsFor(
-  repoName: string,
-  appHost: string,
-  opts?: { format?: VideoFormat; durationSec?: number; presenterName?: string },
-): Record<string, string[]> {
-  const dur = opts?.durationSec ?? 178
-  const mmss = `${Math.floor(dur / 60)}m${String(dur % 60).padStart(2, "0")}s`
-  const pitch = opts?.format === "pitch_demo"
-  return {
-    ingest: [
-      `git: resolving ${repoName}`,
-      "reading README.md, package.json, app/",
-      "found 142 files across 18 directories",
-      "primary language: TypeScript (Next.js)",
-    ],
-    analyze: [
-      "embedding source tree for retrieval",
-      "detected: Next.js App Router, Tailwind, API routes",
-      "identifying hero feature + 3 supporting flows",
-      `reasoning: pacing a natural ${mmss} ${pitch ? "pitch + demo" : "demo"}`,
-    ],
-    script: [
-      "prompt → GMI Cloud (llama-3.3-70b)",
-      pitch ? "scene 1: the pitch — problem + market" : "scene 1: the problem",
-      pitch ? "scene 2: the product, live" : "scene 2: live walkthrough",
-      "scene 3: under the hood + close",
-      `script: paced to fit ${mmss} (human delivery)`,
-    ],
-    voiceover: [
-      "sending script to ElevenLabs",
-      "voice: Devfields Narrator",
-      "rendering 174s of audio @ 44.1kHz",
-      "normalizing loudness to -16 LUFS",
-    ],
-    capture: [
-      `launching headless browser → ${appHost}`,
-      "replaying scripted scene actions per beat",
-      "recording viewport, paced to narration length",
-      "captured scenes @ 1080p (synced to audio)",
-    ],
-    presenter: [
-      opts?.presenterName ? `loading presenter: ${opts.presenterName}` : "loading presenter photo",
-      "generating talking-head frames",
-      "lip-syncing avatar to voiceover phonemes",
-      "rendering picture-in-picture cam (bottom-right)",
-    ],
-    compose: [
-      "muxing each scene's audio + capture clip",
-      "burning in captions + lower-thirds",
-      `rendering 1080p / h.264 → ${mmss}`,
-      `final cut: ${mmss}`,
-    ],
-    publish: [
-      "uploading video.mp4 → b2://devfields",
-      "uploading audio.mp3, script.json, frames/",
-      "writing provenance.json (sha-256 per asset)",
-      "all assets durable on Backblaze B2",
-    ],
-  }
-}
