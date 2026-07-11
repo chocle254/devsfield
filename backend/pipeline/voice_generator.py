@@ -53,7 +53,7 @@ def _generate_one(gmi_api_key: str, job_id: str, segment_id: int,
         Pipeline(f"devfields-voice-{job_id}-seg{segment_id}")
         .step(
             GMICloudAudioProvider(api_key=gmi_api_key),
-            model="ElevenLabs-TTS-v3",",
+            model="ElevenLabs-TTS-v3",
             prompt=text,
             voice=voice_id,
             modality=Modality.AUDIO,
