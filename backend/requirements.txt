@@ -9,3 +9,4 @@ ffmpeg-python==0.2.0
 genblaze-core==0.2.6
 genblaze-s3==0.2.4
 genblaze-gmicloud==0.2.6
+genblaze-elevenlabs
