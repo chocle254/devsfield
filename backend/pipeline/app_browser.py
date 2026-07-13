@@ -15,14 +15,19 @@ Key behaviors:
   screen (title, headings, visible text) — so the narration can describe
   exactly what the viewer is seeing, not what a script guessed.
 """
+import hashlib
 import json
 import os
 import shutil
 import time
 import uuid
+from datetime import datetime, timezone
+from urllib.parse import urldefrag
 
 import httpx
 from playwright.async_api import async_playwright
+
+from jobs import add_snapshot, add_tmp_file
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3-0324"
@@ -50,6 +55,68 @@ async def _safe_goto(page, url: str) -> bool:
     except Exception:
         pass
     return True
+
+
+async def _capture_snapshot(page, job_id: str, capture_state: dict) -> None:
+    """Capture a safe, deduplicated page preview without blocking the run."""
+    snapshot_id = uuid.uuid4().hex
+    file_path = f"/tmp/snapshot_{job_id}_{snapshot_id}.jpg"
+
+    try:
+        # Playwright masks matching elements in the image itself. Values never
+        # enter metadata or the SSE payload.
+        sensitive_fields = page.locator(
+            "input[type='password'], input[name*='password' i], "
+            "input[name*='secret' i], input[name*='token' i], "
+            "input[type='email'], input[name*='email' i], "
+            "input[name*='user' i], input[autocomplete='username'], "
+            "input[autocomplete='current-password'], "
+            "input[autocomplete='new-password']"
+        )
+        await page.screenshot(
+            path=file_path,
+            type="jpeg",
+            quality=65,
+            full_page=False,
+            animations="disabled",
+            caret="hide",
+            mask=[sensitive_fields],
+        )
+
+        with open(file_path, "rb") as image_file:
+            content_hash = hashlib.sha256(image_file.read()).hexdigest()
+        normalized_url = urldefrag(page.url)[0].rstrip("/") or page.url
+
+        if (capture_state.get("url") == normalized_url and
+                capture_state.get("content_hash") == content_hash):
+            os.remove(file_path)
+            return
+
+        try:
+            title = (await page.title()).strip()
+        except Exception:
+            title = ""
+
+        snapshot = {
+            "id": snapshot_id,
+            "url": normalized_url,
+            "title": title or "Loaded page",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "image_url": f"/snapshot/{job_id}/{snapshot_id}",
+            "file_path": file_path,
+            "content_hash": content_hash,
+        }
+        await add_snapshot(job_id, snapshot)
+        await add_tmp_file(job_id, file_path)
+        capture_state.update({"url": normalized_url, "content_hash": content_hash})
+    except Exception:
+        # Visual proof is additive; a screenshot failure must never fail video
+        # generation or expose browser internals to the user.
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
 
 
 async def _observe(page) -> dict:
@@ -81,7 +148,8 @@ async def _observe(page) -> dict:
     return observation
 
 
-async def _attempt_login(page, app_url: str, credentials: dict) -> bool:
+async def _attempt_login(page, app_url: str, credentials: dict,
+                         job_id: str, capture_state: dict) -> bool:
     """
     Find and complete a login form using developer-supplied credentials.
     Returns True if a login was submitted.
@@ -101,6 +169,7 @@ async def _attempt_login(page, app_url: str, credentials: dict) -> bool:
     if not await has_password_field():
         for path in ("/login", "/signin", "/sign-in", "/auth/login", "/auth/signin"):
             if await _safe_goto(page, app_url.rstrip("/") + path):
+                await _capture_snapshot(page, job_id, capture_state)
                 if await has_password_field():
                     break
         else:
@@ -136,6 +205,7 @@ async def _attempt_login(page, app_url: str, credentials: dict) -> bool:
                                            timeout=SETTLE_TIMEOUT_MS)
         except Exception:
             await page.wait_for_timeout(2000)
+        await _capture_snapshot(page, job_id, capture_state)
         return True
     except Exception:
         return False
@@ -255,7 +325,7 @@ async def _perform_action(page, decision: dict) -> None:
 
 async def record_app(app_url: str, repo_context: dict = None,
                      demo_plan: dict = None, credentials: dict = None,
-                     video_length: int = 180) -> dict:
+                     video_length: int = 180, job_id: str = "") -> dict:
     """
     Record the app following the demo plan, tracking segment timestamps.
 
@@ -311,6 +381,7 @@ async def record_app(app_url: str, repo_context: dict = None,
 
             recording_start = time.monotonic()
             camera_used = 0.0  # seconds of actual on-camera segment time
+            capture_state: dict = {}
 
             def elapsed() -> float:
                 return time.monotonic() - recording_start
@@ -319,13 +390,17 @@ async def record_app(app_url: str, repo_context: dict = None,
                 raise RuntimeError(
                     f"Could not load {app_url} — the app did not respond "
                     "within the timeout. Is the deployment up?")
+            if job_id:
+                await _capture_snapshot(page, job_id, capture_state)
 
             # Optional login before demoing (kept OUT of segments — viewers
             # don't need to watch credentials being typed).
             if demo_plan.get("needs_login") and credentials:
-                await _attempt_login(page, app_url, credentials)
+                await _attempt_login(
+                    page, app_url, credentials, job_id, capture_state)
                 # Return to home so beat 1 starts where the plan expects.
-                await _safe_goto(page, app_url)
+                if await _safe_goto(page, app_url) and job_id:
+                    await _capture_snapshot(page, job_id, capture_state)
 
             segment_id = 0
             for beat in beats:
@@ -343,6 +418,8 @@ async def record_app(app_url: str, repo_context: dict = None,
                 if current_path != target.rstrip("/"):
                     if not await _safe_goto(page, target):
                         continue  # page too slow or broken — skip this beat
+                    if job_id:
+                        await _capture_snapshot(page, job_id, capture_state)
 
                 beat_camera_start = elapsed()
                 actions_taken = []
@@ -360,11 +437,20 @@ async def record_app(app_url: str, repo_context: dict = None,
                         observation, beat, actions_taken, seconds_left,
                         app_summary)
 
+                    url_before_action = urldefrag(page.url)[0]
                     await _perform_action(page, decision)
 
                     # Let the result of the action settle and be visible on
                     # camera long enough for the viewer to read/absorb it.
                     await page.wait_for_timeout(4000)
+                    url_after_action = urldefrag(page.url)[0]
+                    if job_id and url_after_action != url_before_action:
+                        try:
+                            await page.wait_for_load_state(
+                                "domcontentloaded", timeout=SETTLE_TIMEOUT_MS)
+                        except Exception:
+                            pass
+                        await _capture_snapshot(page, job_id, capture_state)
 
                     post_observation = await _observe(page)
                     segment_end = elapsed()
