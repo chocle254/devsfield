@@ -95,7 +95,7 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
       </div>
 
       {/* Repository and site */}
-      <Card title="Repository and site" subtitle="Paste the links you want DemoGen to analyze and navigate.">
+      <Card title="Repository and site" subtitle="Paste the links you want Devsfield to analyze and navigate.">
         <TextField
           label="GitHub repository URL"
           type="url"

@@ -36,7 +36,7 @@ export interface VideoOptions {
 
 export type StepStatus = "pending" | "active" | "done" | "error"
 
-export type Provider = "GitHub" | "GMI Cloud" | "ElevenLabs" | "Backblaze B2" | "Devfields"
+export type Provider = "GitHub" | "GMI Cloud" | "ElevenLabs" | "Backblaze B2" | "Devsfield"
 
 export interface StepDef {
   id: StepId

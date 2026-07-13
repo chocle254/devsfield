@@ -54,14 +54,14 @@ export const STEP_DEFS: StepDef[] = [
     id: "capture",
     title: "Capture app walkthrough",
     description: "Drive the live deployment and record key UI flows as frames.",
-    provider: "Devfields",
+    provider: "Devsfield",
     duration: 3400,
   },
   {
     id: "compose",
     title: "Compose demo video",
     description: "Align scenes to narration, add captions, and render the cut.",
-    provider: "Devfields",
+    provider: "Devsfield",
     duration: 4200,
   },
   {
@@ -78,7 +78,7 @@ export const PRESENTER_STEP: StepDef = {
   id: "presenter",
   title: "Animate presenter",
   description: "Turn the uploaded photo into a lip-synced talking head, timed to the voiceover.",
-  provider: "Devfields",
+  provider: "Devsfield",
   duration: 3000,
 }
 
@@ -129,7 +129,7 @@ export function logsFor(
     ],
     voiceover: [
       "sending script to ElevenLabs",
-      "voice: Devfields Narrator",
+      "voice: Devsfield Narrator",
       "rendering 174s of audio @ 44.1kHz",
       "normalizing loudness to -16 LUFS",
     ],

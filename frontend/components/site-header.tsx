@@ -6,12 +6,12 @@ export function SiteHeader() {
       <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4 sm:px-6">
         <Link href="/" className="flex items-center gap-2.5">
           <Logo />
-          <span className="text-lg font-bold tracking-tight text-primary">DemoGen</span>
+          <span className="text-lg font-bold tracking-tight text-primary">Devsfield</span>
         </Link>
         <div className="flex items-center gap-3">
           <span className="hidden items-center gap-2 text-sm text-muted-foreground sm:flex">
             <UserIcon />
-            Devfields Studio
+            Devsfield Studio
           </span>
           <Link
             href="/#start"

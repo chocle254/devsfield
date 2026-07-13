@@ -18,7 +18,7 @@ export default function HomePage() {
             Generate demo video
           </h1>
           <p className="mt-2 text-pretty text-base leading-relaxed text-muted-foreground">
-            Configure how DemoGen analyzes your repository and presents it on screen.
+            Configure how Devsfield analyzes your repository and presents it on screen.
           </p>
         </div>
 
@@ -33,7 +33,7 @@ export default function HomePage() {
 
       <footer className="border-t border-border">
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-2 px-4 py-6 text-xs text-muted-foreground sm:flex-row sm:px-6">
-          <p>DemoGen by Devfields</p>
+          <p>Devsfield</p>
           <p>Backblaze B2 · GMI Cloud · Playwright</p>
         </div>
       </footer>

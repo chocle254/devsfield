@@ -12,7 +12,7 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
             Building your demo video
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Streaming live progress from the DemoGen pipeline.
+            Streaming live progress from the Devsfield pipeline.
           </p>
         </div>
         <PipelineView id={id} />

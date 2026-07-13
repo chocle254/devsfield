@@ -35,7 +35,7 @@
 :root {
   --radius: 0.85rem;
 
-  /* Light canvas — soft off-white, like the DemoGen reference */
+  /* Light canvas — soft off-white, like the Devsfield reference */
   --background: oklch(0.975 0.003 285);
   --foreground: oklch(0.22 0.02 285);
 
