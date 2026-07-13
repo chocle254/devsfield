@@ -1,34 +1,42 @@
 "use client"
 
-import { useRouter } from "next/navigation"
-import { useRef, useState } from "react"
-import type { VideoFormat } from "@/lib/types"
+import { useState } from "react"
 
 const DURATIONS = [
-  { sec: 60, label: "1 min" },
-  { sec: 90, label: "90 sec" },
-  { sec: 180, label: "3 min" },
-  { sec: 300, label: "5 min" },
+  { sec: 60, label: "1m" },
+  { sec: 180, label: "3m" },
+  { sec: 300, label: "5m" },
 ]
 
-export function UrlInputForm() {
-  const router = useRouter()
+// Template presets map directly to the backend `tone` field.
+const TEMPLATES = [
+  { value: "pitch", label: "Professional" },
+  { value: "demo", label: "Conversational" },
+  { value: "technical", label: "Technical" },
+  { value: "pitch_demo", label: "Pitch + demo" },
+]
+
+interface UrlInputFormProps {
+  onStarted: (id: string) => void
+  running: boolean
+}
+
+export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
   const [repoUrl, setRepoUrl] = useState("")
   const [appUrl, setAppUrl] = useState("")
   const [maxDurationSec, setMaxDurationSec] = useState(180)
-  const [format, setFormat] = useState<VideoFormat>("demo")
-  const [presenterOn, setPresenterOn] = useState(false)
-  const [presenterName, setPresenterName] = useState("")
-  const [presenterPhoto, setPresenterPhoto] = useState<string | null>(null)
+  const [tone, setTone] = useState("pitch")
   const [loginOn, setLoginOn] = useState(false)
   const [loginUsername, setLoginUsername] = useState("")
   const [loginPassword, setLoginPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
+
+  const disabled = loading || running
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (disabled) return
     setError(null)
     setLoading(true)
     try {
@@ -40,12 +48,7 @@ export function UrlInputForm() {
           appUrl,
           options: {
             maxDurationSec,
-            format,
-            presenter: {
-              enabled: presenterOn,
-              name: presenterName || undefined,
-              photoUrl: presenterOn ? presenterPhoto ?? undefined : undefined,
-            },
+            tone,
             credentials:
               loginOn && loginUsername && loginPassword
                 ? { username: loginUsername, password: loginPassword }
@@ -59,298 +62,362 @@ export function UrlInputForm() {
         setLoading(false)
         return
       }
-      router.push(`/run/${data.id}`)
+      onStarted(data.id)
+      setLoading(false)
     } catch {
       setError("Network error. Please try again.")
       setLoading(false)
     }
   }
 
-  function fillExample() {
-    setRepoUrl("https://github.com/vercel/next.js")
-    setAppUrl("https://nextjs.org")
-  }
-
-  function onPhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    if (!file.type.startsWith("image/")) {
-      setError("Please upload an image file for the presenter.")
-      return
-    }
-    if (file.size > 4 * 1024 * 1024) {
-      setError("Presenter photo must be under 4 MB.")
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = () => setPresenterPhoto(typeof reader.result === "string" ? reader.result : null)
-    reader.readAsDataURL(file)
+  function reset() {
+    setRepoUrl("")
+    setAppUrl("")
+    setMaxDurationSec(180)
+    setTone("pitch")
+    setLoginOn(false)
+    setLoginUsername("")
+    setLoginPassword("")
+    setError(null)
   }
 
   return (
-    <form
-      onSubmit={onSubmit}
-      className="w-full rounded-xl border border-border bg-card p-2 text-left shadow-2xl shadow-black/40"
-    >
-      <Field
-        label="GitHub repository"
-        icon={<GitIcon />}
-        placeholder="https://github.com/owner/repo"
-        value={repoUrl}
-        onChange={setRepoUrl}
-        autoFocus
-      />
-      <div className="h-px bg-border" />
-      <Field
-        label="Deployed app URL"
-        icon={<GlobeIcon />}
-        placeholder="https://your-app.vercel.app"
-        value={appUrl}
-        onChange={setAppUrl}
-      />
-
-      {/* Options */}
-      <div className="mt-1 space-y-3 rounded-lg border border-border bg-background/40 p-3">
-        {/* Max duration */}
-        <div>
-          <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-            Max length
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {DURATIONS.map((d) => (
-              <Chip key={d.sec} active={maxDurationSec === d.sec} onClick={() => setMaxDurationSec(d.sec)}>
-                {d.label}
-              </Chip>
-            ))}
-          </div>
-        </div>
-
-        {/* Format */}
-        <div>
-          <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-            What to include
-          </p>
-          <div className="grid grid-cols-2 gap-1.5">
-            <SegButton active={format === "demo"} onClick={() => setFormat("demo")}>
-              Demo only
-            </SegButton>
-            <SegButton active={format === "pitch_demo"} onClick={() => setFormat("pitch_demo")}>
-              Pitch + demo
-            </SegButton>
-          </div>
-        </div>
-
-        {/* Demo login */}
-        <div>
-          <button
-            type="button"
-            onClick={() => setLoginOn((v) => !v)}
-            className="flex w-full items-center justify-between gap-3 text-left"
-            aria-pressed={loginOn}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-foreground">Demo login</span>
-              <span className="text-xs text-muted-foreground">
-                App behind a login? Add a demo account so the AI can sign in
-              </span>
-            </span>
-            <span
-              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                loginOn ? "bg-primary" : "bg-input"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 h-4 w-4 rounded-full bg-background transition-transform ${
-                  loginOn ? "translate-x-4" : "translate-x-0.5"
-                }`}
-              />
-            </span>
-          </button>
-
-          {loginOn ? (
-            <div className="mt-3 space-y-2">
-              <input
-                type="text"
-                autoComplete="off"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                placeholder="Demo email or username"
-                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
-              />
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                placeholder="Demo password"
-                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
-              />
-              <p className="text-[11px] text-muted-foreground">
-                Use a throwaway demo account. Credentials are used once during
-                recording and never stored. The login itself is kept out of the
-                final video.
-              </p>
-            </div>
-          ) : null}
-        </div>
-
-        {/* Presenter */}
-        <div>
-          <button
-            type="button"
-            onClick={() => setPresenterOn((v) => !v)}
-            className="flex w-full items-center justify-between gap-3 text-left"
-            aria-pressed={presenterOn}
-          >
-            <span className="flex flex-col">
-              <span className="text-sm font-medium text-foreground">Presenter cam</span>
-              <span className="text-xs text-muted-foreground">
-                Add a Zoom-style talking head from your photo
-              </span>
-            </span>
-            <span
-              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                presenterOn ? "bg-primary" : "bg-input"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 h-4 w-4 rounded-full bg-background transition-transform ${
-                  presenterOn ? "translate-x-4" : "translate-x-0.5"
-                }`}
-              />
-            </span>
-          </button>
-
-          {presenterOn ? (
-            <div className="mt-3 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => fileRef.current?.click()}
-                className="relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-input text-muted-foreground transition-colors hover:border-primary/50"
-                aria-label="Upload presenter photo"
-              >
-                {presenterPhoto ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={presenterPhoto || "/placeholder.svg"} alt="Presenter preview" className="h-full w-full object-cover" />
-                ) : (
-                  <CameraIcon />
-                )}
-              </button>
-              <input ref={fileRef} type="file" accept="image/*" onChange={onPhoto} className="hidden" />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <input
-                  type="text"
-                  value={presenterName}
-                  onChange={(e) => setPresenterName(e.target.value)}
-                  placeholder="Your name (optional)"
-                  className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/50"
-                />
-                <span className="mt-1 text-[11px] text-muted-foreground">
-                  {presenterPhoto ? "Photo added — animated as you present." : "Upload a clear, front-facing photo."}
-                </span>
-              </div>
-            </div>
-          ) : null}
-        </div>
+    <form onSubmit={onSubmit} className="space-y-4">
+      {/* Generation mode tabs */}
+      <div className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-card p-1">
+        <span className="rounded-lg bg-secondary px-4 py-2.5 text-center text-sm font-semibold text-foreground shadow-sm ring-1 ring-border">
+          Single generation
+        </span>
+        <span className="flex items-center justify-center gap-1.5 rounded-lg px-4 py-2.5 text-center text-sm font-medium text-muted-foreground">
+          Batch generation
+          <SoonBadge />
+        </span>
       </div>
 
-      <div className="flex flex-col gap-2 px-1 pb-1 pt-2 sm:flex-row sm:items-center sm:justify-between">
+      {/* Repository and site */}
+      <Card title="Repository and site" subtitle="Paste the links you want DemoGen to analyze and navigate.">
+        <TextField
+          label="GitHub repository URL"
+          type="url"
+          required
+          value={repoUrl}
+          onChange={setRepoUrl}
+          placeholder="https://github.com/username/repo"
+          disabled={disabled}
+        />
+        <TextField
+          label="Deployed site URL"
+          type="url"
+          required
+          value={appUrl}
+          onChange={setAppUrl}
+          placeholder="https://my-app.vercel.app"
+          disabled={disabled}
+        />
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <FieldLabel>Duration</FieldLabel>
+            <div className="grid grid-cols-3 gap-1 rounded-lg border border-border p-1">
+              {DURATIONS.map((d) => (
+                <button
+                  key={d.sec}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setMaxDurationSec(d.sec)}
+                  className={`rounded-md py-2 text-sm font-medium transition-colors disabled:opacity-60 ${
+                    maxDurationSec === d.sec
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <FieldLabel>
+              Video quality <SoonBadge />
+            </FieldLabel>
+            <SelectShell disabled>1080p Full HD</SelectShell>
+          </div>
+        </div>
+      </Card>
+
+      {/* Voiceover & style */}
+      <Card title="Voiceover & style">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <FieldLabel>
+              Language <SoonBadge />
+            </FieldLabel>
+            <SelectShell disabled>English</SelectShell>
+          </div>
+          <div>
+            <FieldLabel>
+              Voice <SoonBadge />
+            </FieldLabel>
+            <SelectShell disabled>Default</SelectShell>
+          </div>
+        </div>
+
+        <div className="sm:w-1/2 sm:pr-2">
+          <FieldLabel>Template</FieldLabel>
+          <div className="relative">
+            <select
+              value={tone}
+              disabled={disabled}
+              onChange={(e) => setTone(e.target.value)}
+              className="w-full appearance-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-ring disabled:opacity-60"
+            >
+              {TEMPLATES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            <ChevronIcon />
+          </div>
+        </div>
+      </Card>
+
+      {/* Enhancements */}
+      <Card title="Enhancements">
+        <ToggleRow
+          title="Demo login"
+          subtitle="App behind a login? Add a demo account so the AI can sign in."
+          checked={loginOn}
+          onChange={() => setLoginOn((v) => !v)}
+          disabled={disabled}
+        />
+        {loginOn ? (
+          <div className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-secondary/60 p-3 sm:grid-cols-2">
+            <input
+              type="text"
+              autoComplete="off"
+              value={loginUsername}
+              onChange={(e) => setLoginUsername(e.target.value)}
+              placeholder="Demo email or username"
+              disabled={disabled}
+              className="w-full rounded-md border border-border bg-card px-2.5 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring"
+            />
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              placeholder="Demo password"
+              disabled={disabled}
+              className="w-full rounded-md border border-border bg-card px-2.5 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring"
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground sm:col-span-2">
+              Used once during recording and never stored. The login screen is kept out of the final video.
+            </p>
+          </div>
+        ) : null}
+
+        <div className="h-px bg-border" />
+
+        <ToggleRow title="Background music" subtitle="Add a subtle music bed under the voiceover." soon />
+        <ToggleRow title="Subtitles / captions" subtitle="Burn captions into the final video." soon />
+        <ToggleRow title="Watermark" subtitle="Add a small branded mark in the corner." soon />
+      </Card>
+
+      {error ? (
+        <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-medium text-destructive" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="flex items-center justify-end gap-3">
         <button
           type="button"
-          onClick={fillExample}
-          className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          onClick={reset}
+          disabled={disabled}
+          className="rounded-lg border border-border bg-card px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-secondary disabled:opacity-60"
         >
-          Try an example →
+          Cancel
         </button>
         <button
           type="submit"
-          disabled={loading}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={disabled}
+          className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? (
             <>
-              <Spinner /> Spinning up pipeline…
+              <Spinner /> Starting…
+            </>
+          ) : running ? (
+            <>
+              <WandIcon /> Generating…
             </>
           ) : (
             <>
-              Generate demo video <ArrowIcon />
+              <WandIcon /> Generate video
             </>
           )}
         </button>
       </div>
-
-      {error ? (
-        <p className="px-2 pb-1.5 pt-1 text-xs font-medium text-destructive" role="alert">
-          {error}
-        </p>
-      ) : null}
     </form>
   )
 }
 
-function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors ${
-        active
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-border bg-background text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      {children}
-    </button>
-  )
-}
-
-function SegButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
-        active
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-border bg-background text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      {children}
-    </button>
-  )
-}
-
-function Field({
-  label,
-  icon,
-  placeholder,
-  value,
-  onChange,
-  autoFocus,
+function Card({
+  title,
+  subtitle,
+  children,
 }: {
-  label: string
-  icon: React.ReactNode
-  placeholder: string
-  value: string
-  onChange: (v: string) => void
-  autoFocus?: boolean
+  title: string
+  subtitle?: string
+  children: React.ReactNode
 }) {
   return (
-    <label className="group flex items-center gap-3 rounded-lg px-3 py-3 transition-colors focus-within:bg-input/60">
-      <span className="text-muted-foreground transition-colors group-focus-within:text-primary">{icon}</span>
-      <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">{label}</span>
-        <input
-          type="url"
-          required
-          autoFocus={autoFocus}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground/60"
-        />
-      </span>
+    <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+      <h2 className="text-base font-semibold text-foreground">{title}</h2>
+      {subtitle ? <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p> : null}
+      <div className="mt-4 space-y-4">{children}</div>
+    </section>
+  )
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-foreground">
+      {children}
+    </span>
+  )
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+  required,
+  disabled,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  type?: string
+  required?: boolean
+  disabled?: boolean
+}) {
+  return (
+    <label className="block">
+      <FieldLabel>{label}</FieldLabel>
+      <input
+        type={type}
+        required={required}
+        disabled={disabled}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-lg border border-border bg-accent/40 px-3 py-2.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-primary focus:bg-card focus:ring-2 focus:ring-ring disabled:opacity-60"
+      />
     </label>
+  )
+}
+
+function SelectShell({ children, disabled }: { children: React.ReactNode; disabled?: boolean }) {
+  return (
+    <div
+      className={`relative flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2.5 text-sm ${
+        disabled ? "text-muted-foreground" : "text-foreground"
+      }`}
+      aria-disabled={disabled}
+    >
+      <span>{children}</span>
+      <ChevronIcon static />
+    </div>
+  )
+}
+
+function ToggleRow({
+  title,
+  subtitle,
+  checked = false,
+  onChange,
+  disabled,
+  soon,
+}: {
+  title: string
+  subtitle: string
+  checked?: boolean
+  onChange?: () => void
+  disabled?: boolean
+  soon?: boolean
+}) {
+  const inactive = soon || disabled
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
+        <p className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+          {title}
+          {soon ? <SoonBadge /> : null}
+        </p>
+        <p className="text-sm text-muted-foreground">{subtitle}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={title}
+        disabled={inactive}
+        onClick={onChange}
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+          checked ? "bg-primary" : "bg-border"
+        } ${inactive ? "cursor-not-allowed opacity-60" : ""}`}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-card shadow transition-transform ${
+            checked ? "translate-x-[22px]" : "translate-x-0.5"
+          }`}
+        />
+      </button>
+    </div>
+  )
+}
+
+function SoonBadge() {
+  return (
+    <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground ring-1 ring-border">
+      Soon
+    </span>
+  )
+}
+
+function ChevronIcon({ static: isStatic }: { static?: boolean }) {
+  return (
+    <svg
+      className={
+        isStatic
+          ? "text-muted-foreground"
+          : "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+      }
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  )
+}
+
+function WandIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m3 21 9-9M15 4V2M15 10V8M12 7h-2M20 7h-2M17 5 15.5 6.5M17 9l-1.5-1.5" />
+    </svg>
   )
 }
 
@@ -359,40 +426,6 @@ function Spinner() {
     <svg className="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none">
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.25" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function ArrowIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 12h14M13 6l6 6-6 6" />
-    </svg>
-  )
-}
-
-function CameraIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-      <circle cx="12" cy="13" r="4" />
-    </svg>
-  )
-}
-
-function GitIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5Z" />
-    </svg>
-  )
-}
-
-function GlobeIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
     </svg>
   )
 }

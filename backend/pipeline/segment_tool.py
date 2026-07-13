@@ -1,20 +1,69 @@
 """
 Shared FFmpeg/ffprobe helpers for segment-based video editing.
+
+Every subprocess call is wrapped with an asyncio timeout. Without this, a
+hung ffmpeg/ffprobe process (for example on a malformed or not-yet-flushed
+Playwright recording) would block the whole pipeline forever with no error,
+no crash and no progress. With the timeout, a hang becomes a caught, logged
+failure that fails the job cleanly instead of stalling silently.
 """
 import asyncio
 import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Timeouts (seconds). ffprobe is a quick metadata read; ffmpeg transcodes
+# can legitimately take a while, so they get a larger budget.
+FFPROBE_TIMEOUT = 30
+FFMPEG_TIMEOUT = 180
+
+
+async def run_subprocess(cmd: list[str], *, timeout: float, label: str) -> tuple[bytes, bytes]:
+    """
+    Run a subprocess with a hard timeout.
+
+    Returns (stdout, stderr) on success. Raises RuntimeError on a non-zero
+    exit code, and TimeoutError (after killing the process) if it hangs past
+    `timeout` seconds.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error("%s timed out after %ss — killing process", label, timeout)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        # Reap the killed process so we don't leak a zombie / pending transport.
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        raise TimeoutError(f"{label} timed out after {timeout}s")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"{label} failed: {stderr.decode(errors='replace')}")
+
+    return stdout, stderr
 
 
 async def get_duration(file_path: str) -> float:
     """Return duration in seconds using ffprobe."""
-    proc = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "json", file_path,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    stdout, _ = await run_subprocess(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "json", file_path,
+        ],
+        timeout=FFPROBE_TIMEOUT,
+        label=f"ffprobe({file_path})",
     )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {stderr.decode()}")
     data = json.loads(stdout.decode())
     return float(data["format"]["duration"])
 
@@ -28,11 +77,7 @@ async def split_clip(full_video_path: str, start_time: float, end_time: float,
         "-c:v", "libx264", "-an",
         output_path, "-y",
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Clip split failed: {stderr.decode()}")
+    await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Clip split")
     return output_path
 
 
@@ -48,11 +93,7 @@ async def pad_video_to_duration(video_path: str, target_duration: float,
         "-c:v", "libx264",
         output_path, "-y",
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Video padding failed: {stderr.decode()}")
+    await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Video padding")
     return output_path
 
 
@@ -90,9 +131,5 @@ async def fit_video_to_duration(video_path: str, target_duration: float,
             output_path, "-y",
         ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Video fitting failed: {stderr.decode()}")
+    await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Video fitting")
     return output_path

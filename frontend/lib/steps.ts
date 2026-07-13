@@ -1,5 +1,26 @@
 import type { StepDef, VideoFormat } from "./types"
 
+/**
+ * The real pipeline steps emitted by the FastAPI backend, in execution order.
+ * `id` matches the backend's `current_step` / `steps_completed` values exactly
+ * (see backend/pipeline/orchestrator.py). `label` is the human-facing status
+ * shown in the live progress card.
+ */
+export interface BackendStep {
+  id: string
+  label: string
+}
+
+export const BACKEND_STEPS: BackendStep[] = [
+  { id: "github_reader", label: "Analyzing repository structure" },
+  { id: "app_browser", label: "Navigating deployed site" },
+  { id: "script_writer", label: "Writing narration script" },
+  { id: "image_generator", label: "Designing title card" },
+  { id: "voice_generator", label: "Generating AI voiceover" },
+  { id: "video_assembler", label: "Assembling video, music & subtitles" },
+  { id: "storage", label: "Uploading & finalizing" },
+]
+
 export const STEP_DEFS: StepDef[] = [
   {
     id: "ingest",

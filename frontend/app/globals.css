@@ -2,7 +2,7 @@
 
 @theme inline {
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-instrument), Georgia, serif;
+  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, monospace;
 
   --color-background: var(--background);
@@ -33,44 +33,41 @@
 }
 
 :root {
-  --radius: 1rem;
+  --radius: 0.85rem;
 
-  /* Obsidian canvas — deliberately darker/richer than flat #0a0a0b */
-  --background: oklch(0.12 0.006 285);
-  --foreground: oklch(0.96 0.006 85); /* warm off-white, not pure white */
+  /* Light canvas — soft off-white, like the DemoGen reference */
+  --background: oklch(0.975 0.003 285);
+  --foreground: oklch(0.22 0.02 285);
 
-  /* Glass surface — translucent, brightened by backdrop-blur in use */
-  --card: oklch(0.22 0.01 285 / 0.55);
-  --card-foreground: oklch(0.96 0.006 85);
+  /* White cards on the light canvas */
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 285);
 
-  --popover: oklch(0.18 0.008 285 / 0.9);
-  --popover-foreground: oklch(0.96 0.006 85);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 285);
 
-  /* Aurora mint — primary accent */
-  --primary: oklch(0.83 0.14 175);
-  --primary-foreground: oklch(0.16 0.02 175);
+  /* Purple — primary brand accent */
+  --primary: oklch(0.55 0.23 293);
+  --primary-foreground: oklch(0.99 0 0);
 
-  /* Aurora violet — secondary light source, keeps this from reading as
-     "one flat accent on black" */
-  --accent-violet: oklch(0.68 0.17 300);
+  --secondary: oklch(0.96 0.005 285);
+  --secondary-foreground: oklch(0.3 0.02 285);
 
-  --secondary: oklch(0.24 0.012 285 / 0.6);
-  --secondary-foreground: oklch(0.96 0.006 85);
+  --muted: oklch(0.96 0.005 285);
+  --muted-foreground: oklch(0.52 0.015 285);
 
-  --muted: oklch(0.24 0.012 285 / 0.5);
-  --muted-foreground: oklch(0.68 0.012 260);
+  /* Soft purple tint used for selected / highlighted rows */
+  --accent: oklch(0.95 0.03 293);
+  --accent-foreground: oklch(0.4 0.18 293);
 
-  --accent: oklch(0.26 0.014 285 / 0.6);
-  --accent-foreground: oklch(0.96 0.006 85);
+  --destructive: oklch(0.58 0.21 25);
+  --destructive-foreground: oklch(0.99 0 0);
 
-  --destructive: oklch(0.64 0.21 25);
-  --destructive-foreground: oklch(0.98 0.006 85);
+  --success: oklch(0.6 0.16 155);
 
-  --success: oklch(0.83 0.14 175);
-
-  --border: oklch(1 0 0 / 0.08);
-  --input: oklch(1 0 0 / 0.06);
-  --ring: oklch(0.83 0.14 175 / 0.5);
+  --border: oklch(0.91 0.004 285);
+  --input: oklch(0.98 0.003 285);
+  --ring: oklch(0.55 0.23 293 / 0.45);
 }
 
 @layer base {
@@ -84,117 +81,29 @@
   }
 }
 
-/* ---------------------------------------------------------------------
-   Aurora field — two soft, large, blurred light sources behind the glass.
-   This is what actually makes glassmorphism read as depth rather than
-   grey semi-transparent boxes: glass needs something colorful and
-   diffuse behind it to refract.
---------------------------------------------------------------------- */
-.aurora-field {
+/* Indeterminate shimmer used by the live progress bar while a step is
+   actively running (before it reports completion). */
+@keyframes progress-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.progress-shimmer::after {
+  content: "";
   position: absolute;
   inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.aurora-field::before,
-.aurora-field::after {
-  content: "";
-  position: absolute;
-  width: 60vw;
-  height: 60vw;
-  max-width: 720px;
-  max-height: 720px;
-  border-radius: 50%;
-  filter: blur(110px);
-  opacity: 0.35;
-  will-change: transform;
-}
-
-.aurora-field::before {
-  top: -10%;
-  left: -8%;
-  background: radial-gradient(circle, var(--primary) 0%, transparent 70%);
-  animation: aurora-drift-a 26s ease-in-out infinite;
-}
-
-.aurora-field::after {
-  bottom: -15%;
-  right: -10%;
-  background: radial-gradient(circle, var(--accent-violet) 0%, transparent 70%);
-  animation: aurora-drift-b 32s ease-in-out infinite;
-}
-
-@keyframes aurora-drift-a {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(4%, 6%) scale(1.08); }
-}
-
-@keyframes aurora-drift-b {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(-5%, -4%) scale(1.05); }
-}
-
-/* ---------------------------------------------------------------------
-   Glass panel — the signature surface. Real frosted glass: backdrop
-   blur + saturation boost, translucent fill, and a top-edge highlight
-   that fakes a light source catching the glass rim.
---------------------------------------------------------------------- */
-.glass-panel {
-  position: relative;
-  background: var(--card);
-  backdrop-filter: blur(24px) saturate(160%);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  border: 1px solid var(--border);
-  box-shadow:
-    0 1px 0 0 oklch(1 0 0 / 0.08) inset,
-    0 24px 60px -20px oklch(0.05 0 0 / 0.6);
-}
-
-/* The "lens" — hero input panel gets a slow rotating gradient border,
-   evoking a camera aperture. This is the one signature element; kept
-   subtle and slow so it reads as alive, not decorated. */
-.glass-lens {
-  position: relative;
-  isolation: isolate;
-}
-
-.glass-lens::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  padding: 1px;
-  background: conic-gradient(
-    from var(--lens-angle, 0deg),
-    var(--primary),
-    var(--accent-violet),
-    var(--primary)
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.55),
+    transparent
   );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0.5;
-  animation: lens-rotate 12s linear infinite;
-  z-index: -1;
-}
-
-@keyframes lens-rotate {
-  to { --lens-angle: 360deg; }
-}
-
-@property --lens-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
+  animation: progress-shimmer 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .aurora-field::before,
-  .aurora-field::after,
-  .glass-lens::before {
+  .progress-shimmer::after {
     animation: none;
   }
 }
