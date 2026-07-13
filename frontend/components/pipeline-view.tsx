@@ -1,9 +1,18 @@
 "use client"
 
+import Image from "next/image"
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { STEP_DEFS, STEP_DEF_BY_ID } from "@/lib/steps"
 import type { StepState } from "@/lib/types"
+
+interface NavigationSnapshot {
+  id: string
+  url: string
+  title: string
+  captured_at: string
+  image_url: string
+}
 
 interface StreamPayload {
   // Backend sends "complete" | "failed" | "in_progress" | "queued".
@@ -14,6 +23,8 @@ interface StreamPayload {
   steps: StepState[]
   steps_completed?: string[]
   current_step?: string
+  message?: string
+  snapshots?: NavigationSnapshot[]
   repoUrl: string
   appUrl: string
 }
@@ -22,7 +33,9 @@ export function PipelineView({ id }: { id: string }) {
   const router = useRouter()
   const [data, setData] = useState<StreamPayload | null>(null)
   const [notFound, setNotFound] = useState(false)
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null)
   const redirected = useRef(false)
+  const latestSnapshotId = useRef<string | null>(null)
 
   useEffect(() => {
     const es = new EventSource(`/api/stream/${id}`)
@@ -37,6 +50,11 @@ export function PipelineView({ id }: { id: string }) {
       if (raw.status === "complete") raw.status = "done"
       if (raw.status === "failed") raw.status = "error"
       if (raw.status === "in_progress" || raw.status === "queued") raw.status = "running"
+      const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
+      if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
+        latestSnapshotId.current = latestSnapshot.id
+        setSelectedSnapshotId(latestSnapshot.id)
+      }
       setData(raw)
       if (raw.status === "done" && !redirected.current) {
         redirected.current = true
@@ -60,6 +78,10 @@ export function PipelineView({ id }: { id: string }) {
   const doneCount = steps.filter((s) => s.status === "done").length
   const progress = Math.round((doneCount / Math.max(steps.length, 1)) * 100)
   const isDone = data?.status === "done"
+  const snapshots = data?.snapshots ?? []
+  const selectedSnapshot =
+    snapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? snapshots.at(-1)
+  const isBrowsing = data?.current_step === "app_browser"
 
   return (
     <div className="w-full">
@@ -78,6 +100,16 @@ export function PipelineView({ id }: { id: string }) {
           style={{ width: `${isDone ? 100 : progress}%` }}
         />
       </div>
+
+      {isBrowsing || snapshots.length > 0 ? (
+        <NavigationViewer
+          runId={id}
+          snapshots={snapshots}
+          selectedSnapshot={selectedSnapshot}
+          onSelect={setSelectedSnapshotId}
+          isLive={isBrowsing}
+        />
+      ) : null}
 
       <ol className="relative">
         {steps.map((state, i) => {
@@ -154,6 +186,136 @@ export function PipelineView({ id }: { id: string }) {
       ) : null}
     </div>
   )
+}
+
+function NavigationViewer({
+  runId,
+  snapshots,
+  selectedSnapshot,
+  onSelect,
+  isLive,
+}: {
+  runId: string
+  snapshots: NavigationSnapshot[]
+  selectedSnapshot?: NavigationSnapshot
+  onSelect: (id: string) => void
+  isLive: boolean
+}) {
+  const hostname = selectedSnapshot
+    ? getHostname(selectedSnapshot.url)
+    : "Waiting for the browser"
+
+  return (
+    <section
+      className="mb-8 overflow-hidden rounded-xl border border-border bg-card"
+      aria-labelledby="navigation-viewer-title"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-border p-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full bg-primary ${isLive ? "animate-pulse" : ""}`}
+              aria-hidden="true"
+            />
+            <h2 id="navigation-viewer-title" className="text-sm font-semibold text-foreground">
+              AI is navigating
+            </h2>
+          </div>
+          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+            {hostname}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full border border-primary/40 px-2.5 py-1 font-mono text-[10px] text-primary">
+          {snapshots.length} {snapshots.length === 1 ? "page" : "pages"}
+        </span>
+      </div>
+
+      <div className="p-3 sm:p-4">
+        <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-background">
+          {selectedSnapshot ? (
+            <Image
+              key={selectedSnapshot.id}
+              src={`/api/snapshot/${encodeURIComponent(runId)}/${encodeURIComponent(selectedSnapshot.id)}`}
+              alt={`AI browser view of ${selectedSnapshot.title} at ${hostname}`}
+              fill
+              unoptimized
+              sizes="(max-width: 640px) 100vw, 720px"
+              className="object-contain"
+              priority
+            />
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+              <span className="flex h-10 w-10 items-center justify-center rounded-full border border-primary/40 bg-primary/10">
+                <Spinner />
+              </span>
+              <div>
+                <p className="text-sm font-medium text-foreground">Opening your app</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  The first loaded page will appear here.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {selectedSnapshot ? (
+          <div className="mt-3 flex items-start justify-between gap-3" aria-live="polite">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-foreground">
+                {selectedSnapshot.title}
+              </p>
+              <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+                {selectedSnapshot.url}
+              </p>
+            </div>
+            <span className="shrink-0 font-mono text-[10px] text-primary">
+              loaded
+            </span>
+          </div>
+        ) : null}
+
+        {snapshots.length > 1 ? (
+          <div className="mt-4 flex gap-2 overflow-x-auto pb-1" aria-label="Loaded page history">
+            {snapshots.map((snapshot, index) => {
+              const selected = snapshot.id === selectedSnapshot?.id
+              return (
+                <button
+                  key={snapshot.id}
+                  type="button"
+                  onClick={() => onSelect(snapshot.id)}
+                  aria-pressed={selected}
+                  aria-label={`View loaded page ${index + 1}: ${snapshot.title}`}
+                  className={`relative aspect-video w-28 shrink-0 overflow-hidden rounded-md border bg-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                    selected ? "border-primary" : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <Image
+                    src={`/api/snapshot/${encodeURIComponent(runId)}/${encodeURIComponent(snapshot.id)}`}
+                    alt=""
+                    fill
+                    unoptimized
+                    sizes="112px"
+                    className="object-cover"
+                  />
+                  <span className="absolute bottom-1 left-1 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[9px] text-foreground">
+                    {index + 1}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function getHostname(url: string) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
 }
 
 function Node({ status, index }: { status: StepState["status"]; index: number }) {

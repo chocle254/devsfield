@@ -18,6 +18,15 @@ class GenerateRequest(BaseModel):
     credentials: Optional[AppCredentials] = None
 
 
+class NavigationSnapshot(BaseModel):
+    """Safe metadata for a browser screenshot captured during a run."""
+    id: str
+    url: str
+    title: str
+    captured_at: str
+    image_url: str
+
+
 class JobStatus(BaseModel):
     """Current status of a job."""
     job_id: str
@@ -27,6 +36,7 @@ class JobStatus(BaseModel):
     steps_total: int = 7
     message: Optional[str] = None
     error: Optional[str] = None
+    snapshots: list[NavigationSnapshot] = Field(default_factory=list)
 
 
 class JobResult(BaseModel):

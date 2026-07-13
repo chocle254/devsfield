@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Optional
 
 # Global jobs dict stores all job state
@@ -17,6 +18,7 @@ async def create_job(job_id: str) -> None:
             "error": None,
             "result": None,
             "tmp_files": [],
+            "snapshots": [],
         }
 
 
@@ -82,3 +84,32 @@ async def get_tmp_files(job_id: str) -> list[str]:
         if job_id in jobs:
             return list(jobs[job_id]["tmp_files"])
         return []
+
+
+async def add_snapshot(job_id: str, snapshot: dict, max_snapshots: int = 24) -> None:
+    """Append bounded, safe snapshot metadata to a job."""
+    async with jobs_lock:
+        if job_id not in jobs:
+            return
+        snapshots = jobs[job_id]["snapshots"]
+        snapshots.append(snapshot)
+        if len(snapshots) > max_snapshots:
+            removed = snapshots.pop(0)
+            removed_path = removed.get("file_path")
+            if removed_path:
+                try:
+                    os.remove(removed_path)
+                except OSError:
+                    pass
+
+
+async def get_snapshot(job_id: str, snapshot_id: str) -> Optional[dict]:
+    """Resolve a snapshot only when it belongs to the requested job."""
+    async with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return None
+        for snapshot in job.get("snapshots", []):
+            if snapshot.get("id") == snapshot_id:
+                return dict(snapshot)
+        return None

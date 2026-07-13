@@ -30,7 +30,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
         recording = await app_browser.record_app(
             request.app_url, context,
             demo_plan=plan, credentials=credentials,
-            video_length=request.video_length)
+            video_length=request.video_length, job_id=job_id)
         await add_tmp_file(job_id, recording["video_path"])
         await complete_step(job_id, "app_browser")
 

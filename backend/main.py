@@ -15,11 +15,11 @@ import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 
 from models import GenerateRequest, JobStatus, JobResult
-from jobs import create_job, get_job
+from jobs import create_job, get_job, get_snapshot
 from pipeline.orchestrator import run_pipeline
 
 load_dotenv()
@@ -94,6 +94,11 @@ async def get_status(job_id: str) -> JobStatus:
         steps_total=7,
         message=job.get("message"),
         error=job.get("error"),
+        snapshots=[
+            {key: value for key, value in snapshot.items()
+             if key not in ("file_path", "content_hash")}
+            for snapshot in job.get("snapshots", [])
+        ],
     )
 
 
@@ -136,6 +141,11 @@ async def sse_generator(job_id: str):
             "steps_completed": job.get("steps_completed", []),
             "message": job.get("message"),
             "error": job.get("error"),
+            "snapshots": [
+                {key: value for key, value in snapshot.items()
+                 if key not in ("file_path", "content_hash")}
+                for snapshot in job.get("snapshots", [])
+            ],
         }
 
         result = job.get("result")
@@ -164,6 +174,24 @@ async def stream_job(job_id: str):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
         },
+    )
+
+
+@app.get("/snapshot/{job_id}/{snapshot_id}")
+async def serve_snapshot(job_id: str, snapshot_id: str):
+    """Serve a snapshot only through its owning run and opaque snapshot ID."""
+    snapshot = await get_snapshot(job_id, snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    file_path = snapshot.get("file_path")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Snapshot no longer available")
+
+    return FileResponse(
+        file_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
