@@ -346,7 +346,7 @@ async def record_app(app_url: str, repo_context: dict = None,
 
                 beat_camera_start = elapsed()
                 actions_taken = []
-                max_actions = 4
+                max_actions = 6
 
                 for _ in range(max_actions):
                     beat_camera_used = elapsed() - beat_camera_start
@@ -362,8 +362,9 @@ async def record_app(app_url: str, repo_context: dict = None,
 
                     await _perform_action(page, decision)
 
-                    # Let the result of the action be visible on camera
-                    await page.wait_for_timeout(2500)
+                    # Let the result of the action settle and be visible on
+                    # camera long enough for the viewer to read/absorb it.
+                    await page.wait_for_timeout(4000)
 
                     post_observation = await _observe(page)
                     segment_end = elapsed()
