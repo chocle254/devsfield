@@ -24,6 +24,9 @@ interface StreamPayload {
   steps_completed?: string[]
   current_step?: string
   message?: string
+  activity?: string
+  activity_seq?: number
+  activity_updated_at?: string
   snapshots?: NavigationSnapshot[]
   repoUrl: string
   appUrl: string
@@ -34,36 +37,77 @@ export function PipelineView({ id }: { id: string }) {
   const [data, setData] = useState<StreamPayload | null>(null)
   const [notFound, setNotFound] = useState(false)
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [elapsedSec, setElapsedSec] = useState(0)
+  const [lastUpdateAt, setLastUpdateAt] = useState<number>(() => Date.now())
+  const [now, setNow] = useState<number>(() => Date.now())
   const redirected = useRef(false)
   const latestSnapshotId = useRef<string | null>(null)
+  const startedAt = useRef<number>(Date.now())
+
+  // Tick every second so the elapsed timer and quiet-period notice stay live.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt.current) / 1000))
+      setNow(Date.now())
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => {
-    const es = new EventSource(`/api/stream/${id}`)
-    es.onmessage = (e) => {
-      const raw = JSON.parse(e.data)
-      if (raw.error === "not_found" || raw.error === "Job not found") {
-        setNotFound(true)
-        es.close()
-        return
+    let es: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let closedForGood = false
+
+    const connect = () => {
+      es = new EventSource(`/api/stream/${id}`)
+      es.onopen = () => setReconnecting(false)
+      es.onmessage = (e) => {
+        setReconnecting(false)
+        setLastUpdateAt(Date.now())
+        const raw = JSON.parse(e.data)
+        if (raw.error === "not_found" || raw.error === "Job not found") {
+          setNotFound(true)
+          closedForGood = true
+          es?.close()
+          return
+        }
+        // Normalise backend status vocabulary → frontend vocabulary
+        if (raw.status === "complete") raw.status = "done"
+        if (raw.status === "failed") raw.status = "error"
+        if (raw.status === "in_progress" || raw.status === "queued") raw.status = "running"
+        const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
+        if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
+          latestSnapshotId.current = latestSnapshot.id
+          setSelectedSnapshotId(latestSnapshot.id)
+        }
+        setData(raw)
+        if (raw.status === "done" && !redirected.current) {
+          redirected.current = true
+          closedForGood = true
+          es?.close()
+          setTimeout(() => router.push(`/result/${id}`), 900)
+        }
+        if (raw.status === "error") {
+          closedForGood = true
+          es?.close()
+        }
       }
-      // Normalise backend status vocabulary → frontend vocabulary
-      if (raw.status === "complete") raw.status = "done"
-      if (raw.status === "failed") raw.status = "error"
-      if (raw.status === "in_progress" || raw.status === "queued") raw.status = "running"
-      const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
-      if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
-        latestSnapshotId.current = latestSnapshot.id
-        setSelectedSnapshotId(latestSnapshot.id)
-      }
-      setData(raw)
-      if (raw.status === "done" && !redirected.current) {
-        redirected.current = true
-        es.close()
-        setTimeout(() => router.push(`/result/${id}`), 900)
+      es.onerror = () => {
+        es?.close()
+        if (closedForGood || redirected.current) return
+        // Transient network hiccup — show it and retry instead of freezing.
+        setReconnecting(true)
+        retryTimer = setTimeout(connect, 2500)
       }
     }
-    es.onerror = () => es.close()
-    return () => es.close()
+
+    connect()
+    return () => {
+      closedForGood = true
+      if (retryTimer) clearTimeout(retryTimer)
+      es?.close()
+    }
   }, [id, router])
 
   if (notFound) {
@@ -82,6 +126,11 @@ export function PipelineView({ id }: { id: string }) {
   const selectedSnapshot =
     snapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? snapshots.at(-1)
   const isBrowsing = data?.current_step === "app_browser"
+  const isRunning = !isDone && data?.status !== "error" && !notFound
+  // Quiet period: no fresh stream data for a while — reassure the user.
+  const quietForSec = Math.max(0, Math.floor((now - lastUpdateAt) / 1000))
+  const activityText =
+    data?.activity ?? data?.message ?? "Starting your run"
 
   return (
     <div className="w-full">

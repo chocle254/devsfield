@@ -398,6 +398,8 @@ async def record_app(app_url: str, repo_context: dict = None,
             # Optional login before demoing (kept OUT of segments — viewers
             # don't need to watch credentials being typed).
             if demo_plan.get("needs_login") and credentials:
+                if job_id:
+                    await set_activity(job_id, "Signing in to the app")
                 await _attempt_login(
                     page, app_url, credentials, job_id, capture_state)
                 # Return to home so beat 1 starts where the plan expects.
@@ -417,7 +419,12 @@ async def record_app(app_url: str, repo_context: dict = None,
                 route = beat.get("route") or "/"
                 target = (app_url.rstrip("/") + route) if route != "/" else app_url
                 current_path = page.url.rstrip("/")
+                feature_name = beat.get("feature") or "the app"
+                if job_id:
+                    await set_activity(job_id, f"Exploring {feature_name}")
                 if current_path != target.rstrip("/"):
+                    if job_id:
+                        await set_activity(job_id, f"Loading {route}")
                     if not await _safe_goto(page, target):
                         continue  # page too slow or broken — skip this beat
                     if job_id:
@@ -434,16 +441,28 @@ async def record_app(app_url: str, repo_context: dict = None,
                         break
 
                     segment_start = elapsed()
+                    if job_id:
+                        await set_activity(
+                            job_id, f"Inspecting {feature_name}")
                     observation = await _observe(page)
+                    if job_id:
+                        await set_activity(job_id, "Deciding the next action")
                     decision = await _get_next_action(
                         observation, beat, actions_taken, seconds_left,
                         app_summary)
 
                     url_before_action = urldefrag(page.url)[0]
+                    if job_id:
+                        action_name = decision.get("action", "interacting")
+                        await set_activity(
+                            job_id, f"Performing action: {action_name}")
                     await _perform_action(page, decision)
 
                     # Let the result of the action settle and be visible on
                     # camera long enough for the viewer to read/absorb it.
+                    if job_id:
+                        await set_activity(
+                            job_id, "Letting the page settle on camera")
                     await page.wait_for_timeout(4000)
                     url_after_action = urldefrag(page.url)[0]
                     if job_id and url_after_action != url_before_action:
@@ -479,6 +498,8 @@ async def record_app(app_url: str, repo_context: dict = None,
                 camera_used += elapsed() - beat_camera_start
 
             # Small tail so the last frame isn't cut mid-motion
+            if job_id:
+                await set_activity(job_id, "Finishing the recording")
             await page.wait_for_timeout(1500)
 
             video = page.video

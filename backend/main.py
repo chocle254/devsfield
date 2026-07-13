@@ -140,6 +140,9 @@ async def sse_generator(job_id: str):
             "current_step": job.get("current_step"),
             "steps_completed": job.get("steps_completed", []),
             "message": job.get("message"),
+            "activity": job.get("activity"),
+            "activity_seq": job.get("activity_seq", 0),
+            "activity_updated_at": job.get("activity_updated_at"),
             "error": job.get("error"),
             "snapshots": [
                 {key: value for key, value in snapshot.items()
