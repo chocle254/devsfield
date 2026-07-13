@@ -3,8 +3,7 @@
 import Image from "next/image"
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { STEP_DEFS, STEP_DEF_BY_ID } from "@/lib/steps"
-import type { StepState } from "@/lib/types"
+import { BACKEND_STEPS } from "@/lib/steps"
 
 interface NavigationSnapshot {
   id: string
@@ -15,18 +14,14 @@ interface NavigationSnapshot {
 }
 
 interface StreamPayload {
-  // Backend sends "complete" | "failed" | "in_progress" | "queued".
-  // We normalise to the frontend vocabulary immediately after parsing.
-  id: string
   job_id?: string
-  status: "running" | "done" | "error" | "complete" | "in_progress" | "queued" | "failed"
-  steps: StepState[]
+  status: "queued" | "in_progress" | "complete" | "failed"
+  current_step?: string | null
   steps_completed?: string[]
-  current_step?: string
   message?: string
+  error?: string | null
   snapshots?: NavigationSnapshot[]
-  repoUrl: string
-  appUrl: string
+  video_url?: string
 }
 
 export function PipelineView({ id }: { id: string }) {
@@ -46,20 +41,19 @@ export function PipelineView({ id }: { id: string }) {
         es.close()
         return
       }
-      // Normalise backend status vocabulary → frontend vocabulary
-      if (raw.status === "complete") raw.status = "done"
-      if (raw.status === "failed") raw.status = "error"
-      if (raw.status === "in_progress" || raw.status === "queued") raw.status = "running"
       const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
       if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
         latestSnapshotId.current = latestSnapshot.id
         setSelectedSnapshotId(latestSnapshot.id)
       }
       setData(raw)
-      if (raw.status === "done" && !redirected.current) {
+      if (raw.status === "complete" && !redirected.current) {
         redirected.current = true
         es.close()
         setTimeout(() => router.push(`/result/${id}`), 900)
+      }
+      if (raw.status === "failed") {
+        es.close()
       }
     }
     es.onerror = () => es.close()
@@ -68,39 +62,87 @@ export function PipelineView({ id }: { id: string }) {
 
   if (notFound) {
     return (
-      <div className="rounded-xl border border-border bg-card p-8 text-center">
+      <div className="rounded-xl border border-border bg-card p-6 text-center shadow-sm">
         <p className="text-sm text-muted-foreground">This run could not be found. It may have expired.</p>
       </div>
     )
   }
 
-  const steps = data?.steps ?? STEP_DEFS.map((d) => ({ id: d.id, status: "pending" as const, logs: [], mode: "simulated" as const }))
-  const doneCount = steps.filter((s) => s.status === "done").length
-  const progress = Math.round((doneCount / Math.max(steps.length, 1)) * 100)
-  const isDone = data?.status === "done"
+  const status = data?.status ?? "queued"
+  const isDone = status === "complete"
+  const isError = status === "failed"
+
+  const completed = new Set(
+    (data?.steps_completed ?? []).filter((sid) => BACKEND_STEPS.some((s) => s.id === sid)),
+  )
+  const doneCount = BACKEND_STEPS.filter((s) => completed.has(s.id)).length
+  const currentIndex = BACKEND_STEPS.findIndex((s) => s.id === data?.current_step)
+  const total = BACKEND_STEPS.length
+
+  // Real progress: completed steps, plus half-credit for the step currently
+  // running so the bar advances as soon as a new step starts.
+  const progress = isDone
+    ? 100
+    : Math.min(96, Math.round(((doneCount + (currentIndex >= 0 ? 0.5 : 0)) / total) * 100))
+
+  // Primary status line, matching the backend's real activity.
+  const statusLabel = isError
+    ? "Generation failed"
+    : isDone
+      ? "Done — opening your demo…"
+      : currentIndex >= 0
+        ? BACKEND_STEPS[currentIndex].label
+        : doneCount > 0 && doneCount < total
+          ? BACKEND_STEPS[doneCount].label
+          : data?.message ?? "Preparing pipeline…"
+
   const snapshots = data?.snapshots ?? []
   const selectedSnapshot =
     snapshots.find((snapshot) => snapshot.id === selectedSnapshotId) ?? snapshots.at(-1)
   const isBrowsing = data?.current_step === "app_browser"
 
   return (
-    <div className="w-full">
-      <div className="mb-6 flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className="truncate font-mono text-xs text-muted-foreground">
-            {data?.repoUrl ?? "resolving repository…"}
+    <div className="space-y-5">
+      {/* Live progress card */}
+      <section
+        className={`rounded-xl border bg-card p-5 shadow-sm ${
+          isError ? "border-destructive/40" : "border-border"
+        }`}
+        aria-live="polite"
+      >
+        <div className="flex items-center gap-2.5">
+          {isError ? (
+            <AlertIcon />
+          ) : isDone ? (
+            <CheckCircleIcon />
+          ) : (
+            <Spinner />
+          )}
+          <p className={`text-sm font-medium ${isError ? "text-destructive" : "text-foreground"}`}>
+            {statusLabel}
           </p>
+          {!isError && !isDone ? (
+            <span className="ml-auto text-sm font-semibold tabular-nums text-primary">{progress}%</span>
+          ) : null}
         </div>
-        <span className="shrink-0 font-mono text-xs text-primary">{progress}%</span>
-      </div>
 
-      <div className="mb-8 h-1 w-full overflow-hidden rounded-full bg-input">
-        <div
-          className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
-          style={{ width: `${isDone ? 100 : progress}%` }}
-        />
-      </div>
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-secondary">
+          <div
+            className={`relative h-full rounded-full transition-all duration-700 ease-out ${
+              isError ? "bg-destructive" : "bg-primary"
+            } ${!isError && !isDone ? "progress-shimmer" : ""}`}
+            style={{ width: `${isError ? 100 : progress}%` }}
+          />
+        </div>
 
+        <p className="mt-3 text-xs text-muted-foreground">
+          {isError
+            ? (data?.error ?? "Something went wrong while generating your video.")
+            : "Do not close this page. Generation continues on the server."}
+        </p>
+      </section>
+
+      {/* Snapshots — what the AI is seeing as it navigates the app */}
       {isBrowsing || snapshots.length > 0 ? (
         <NavigationViewer
           runId={id}
@@ -111,79 +153,38 @@ export function PipelineView({ id }: { id: string }) {
         />
       ) : null}
 
-      <ol className="relative">
-        {steps.map((state, i) => {
-          const def = STEP_DEF_BY_ID[state.id] ?? {
-            id: state.id,
-            title: state.id,
-            description: "",
-            provider: "Devfields" as const,
-            duration: 0,
-          }
-          const isLast = i === steps.length - 1
-          return (
-            <li key={def.id} className="relative flex gap-4 pb-6 last:pb-0">
-              {/* connector */}
-              {!isLast ? (
+      {/* Step checklist — the real pipeline stages */}
+      <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-foreground">Pipeline</h2>
+        <ol className="mt-3 space-y-2.5">
+          {BACKEND_STEPS.map((step) => {
+            const done = completed.has(step.id)
+            const active = step.id === data?.current_step
+            const errored = isError && active
+            return (
+              <li key={step.id} className="flex items-center gap-3">
+                <StepNode done={done} active={active} errored={errored} />
                 <span
-                  className={`absolute left-[15px] top-9 h-[calc(100%-12px)] w-px ${
-                    state.status === "done" ? "bg-primary/60" : "bg-border"
+                  className={`text-sm ${
+                    done
+                      ? "text-foreground"
+                      : active
+                        ? "font-medium text-foreground"
+                        : "text-muted-foreground"
                   }`}
-                  aria-hidden
-                />
-              ) : null}
-
-              <Node status={state.status} index={i} />
-
-              <div className="min-w-0 flex-1 pt-0.5">
-                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <h3
-                    className={`text-sm font-semibold ${
-                      state.status === "pending" ? "text-muted-foreground" : "text-foreground"
-                    }`}
-                  >
-                    {def.title}
-                  </h3>
-                  <span className="rounded-full border border-border px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-                    {def.provider}
-                  </span>
-                  {state.status === "active" ? (
-                    <ModeTag mode={state.mode} />
-                  ) : null}
-                  {state.status === "done" ? (
-                    <span className="font-mono text-[10px] text-primary">done</span>
-                  ) : null}
-                </div>
-
-                {state.status === "active" || state.status === "done" ? (
-                  <div className="mt-2 rounded-lg border border-border bg-background/60 p-2.5">
-                    {state.logs.length === 0 ? (
-                      <p className="font-mono text-xs text-muted-foreground">initializing…</p>
-                    ) : (
-                      <ul className="space-y-1">
-                        {state.logs.map((line, li) => (
-                          <li key={li} className="flex items-start gap-2 font-mono text-xs text-muted-foreground">
-                            <span className="select-none text-primary/70">›</span>
-                            <span className="break-words">{line}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ) : (
-                  <p className="mt-1 text-xs text-muted-foreground">{def.description}</p>
-                )}
-              </div>
-            </li>
-          )
-        })}
-      </ol>
-
-      {isDone ? (
-        <div className="mt-2 flex items-center gap-2 font-mono text-xs text-primary">
-          <Spinner /> Render complete — opening your demo…
-        </div>
-      ) : null}
+                >
+                  {step.label}
+                </span>
+                {active && !isError ? (
+                  <span className="ml-auto text-xs font-medium text-primary">running</span>
+                ) : done ? (
+                  <span className="ml-auto text-xs text-success">done</span>
+                ) : null}
+              </li>
+            )
+          })}
+        </ol>
+      </section>
     </div>
   )
 }
@@ -201,13 +202,11 @@ function NavigationViewer({
   onSelect: (id: string) => void
   isLive: boolean
 }) {
-  const hostname = selectedSnapshot
-    ? getHostname(selectedSnapshot.url)
-    : "Waiting for the browser"
+  const hostname = selectedSnapshot ? getHostname(selectedSnapshot.url) : "Waiting for the browser"
 
   return (
     <section
-      className="mb-8 overflow-hidden rounded-xl border border-border bg-card"
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
       aria-labelledby="navigation-viewer-title"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border p-4">
@@ -218,20 +217,18 @@ function NavigationViewer({
               aria-hidden="true"
             />
             <h2 id="navigation-viewer-title" className="text-sm font-semibold text-foreground">
-              AI is navigating
+              Live navigation snapshots
             </h2>
           </div>
-          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-            {hostname}
-          </p>
+          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{hostname}</p>
         </div>
-        <span className="shrink-0 rounded-full border border-primary/40 px-2.5 py-1 font-mono text-[10px] text-primary">
+        <span className="shrink-0 rounded-full bg-accent px-2.5 py-1 text-[11px] font-medium text-accent-foreground">
           {snapshots.length} {snapshots.length === 1 ? "page" : "pages"}
         </span>
       </div>
 
       <div className="p-3 sm:p-4">
-        <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-background">
+        <div className="relative aspect-video overflow-hidden rounded-lg border border-border bg-secondary">
           {selectedSnapshot ? (
             <Image
               key={selectedSnapshot.id}
@@ -245,7 +242,7 @@ function NavigationViewer({
             />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-              <span className="flex h-10 w-10 items-center justify-center rounded-full border border-primary/40 bg-primary/10">
+              <span className="flex h-10 w-10 items-center justify-center rounded-full bg-accent">
                 <Spinner />
               </span>
               <div>
@@ -261,16 +258,12 @@ function NavigationViewer({
         {selectedSnapshot ? (
           <div className="mt-3 flex items-start justify-between gap-3" aria-live="polite">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-foreground">
-                {selectedSnapshot.title}
-              </p>
+              <p className="truncate text-sm font-medium text-foreground">{selectedSnapshot.title}</p>
               <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
                 {selectedSnapshot.url}
               </p>
             </div>
-            <span className="shrink-0 font-mono text-[10px] text-primary">
-              loaded
-            </span>
+            <span className="shrink-0 text-[11px] font-medium text-success">loaded</span>
           </div>
         ) : null}
 
@@ -285,7 +278,7 @@ function NavigationViewer({
                   onClick={() => onSelect(snapshot.id)}
                   aria-pressed={selected}
                   aria-label={`View loaded page ${index + 1}: ${snapshot.title}`}
-                  className={`relative aspect-video w-28 shrink-0 overflow-hidden rounded-md border bg-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+                  className={`relative aspect-video w-28 shrink-0 overflow-hidden rounded-md border bg-secondary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     selected ? "border-primary" : "border-border hover:border-primary/50"
                   }`}
                 >
@@ -297,7 +290,7 @@ function NavigationViewer({
                     sizes="112px"
                     className="object-cover"
                   />
-                  <span className="absolute bottom-1 left-1 rounded bg-background/90 px-1.5 py-0.5 font-mono text-[9px] text-foreground">
+                  <span className="absolute bottom-1 left-1 rounded bg-card/90 px-1.5 py-0.5 font-mono text-[9px] text-foreground">
                     {index + 1}
                   </span>
                 </button>
@@ -318,41 +311,34 @@ function getHostname(url: string) {
   }
 }
 
-function Node({ status, index }: { status: StepState["status"]; index: number }) {
-  if (status === "done") {
+function StepNode({ done, active, errored }: { done: boolean; active: boolean; errored: boolean }) {
+  if (errored) {
     return (
-      <span className="z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+          <path d="M18 6 6 18M6 6l12 12" />
+        </svg>
+      </span>
+    )
+  }
+  if (done) {
+    return (
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
           <path d="M5 13l4 4L19 7" />
         </svg>
       </span>
     )
   }
-  if (status === "active") {
+  if (active) {
     return (
-      <span className="animate-pulse-ring z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 border-primary bg-card">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-primary bg-card">
         <Spinner />
       </span>
     )
   }
   return (
-    <span className="z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border bg-card font-mono text-xs text-muted-foreground">
-      {index + 1}
-    </span>
-  )
-}
-
-function ModeTag({ mode }: { mode: "real" | "simulated" }) {
-  return (
-    <span
-      className={`rounded-full px-2 py-0.5 font-mono text-[10px] ${
-        mode === "real"
-          ? "border border-primary/40 text-primary"
-          : "border border-border text-muted-foreground"
-      }`}
-    >
-      {mode === "real" ? "live api" : "simulated"}
-    </span>
+    <span className="h-6 w-6 shrink-0 rounded-full border border-border bg-secondary" aria-hidden />
   )
 }
 
@@ -361,6 +347,24 @@ function Spinner() {
     <svg className="animate-spin text-primary" width="15" height="15" viewBox="0 0 24 24" fill="none">
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.25" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CheckCircleIcon() {
+  return (
+    <svg className="text-success" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12 3 3 5-6" />
+    </svg>
+  )
+}
+
+function AlertIcon() {
+  return (
+    <svg className="text-destructive" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v4M12 16h.01" />
     </svg>
   )
 }

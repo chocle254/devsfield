@@ -2,12 +2,25 @@
 Assembles the final video from segments: splits the full recording into
 per-segment clips, pads each to match its voiceover's duration, merges
 audio+video per segment, then concatenates everything with the title card.
+
+Every ffmpeg call goes through segment_tool.run_subprocess, which enforces a
+hard timeout so a hung encode fails the job cleanly instead of stalling the
+whole pipeline forever.
 """
-import asyncio
 import os
 from typing import Optional
 
-from pipeline.segment_tool import get_duration, split_clip, fit_video_to_duration
+from pipeline.segment_tool import (
+    get_duration,
+    split_clip,
+    fit_video_to_duration,
+    run_subprocess,
+    FFMPEG_TIMEOUT,
+)
+
+# The final concat re-encodes every segment plus the title card into one file,
+# so it needs a larger budget than a single-clip operation.
+CONCAT_TIMEOUT = 600
 
 
 async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> str:
@@ -18,11 +31,7 @@ async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> 
         "-map", "0:v:0", "-map", "1:a:0",
         output_path, "-y",
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Segment merge failed: {stderr.decode()}")
+    await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Segment merge")
     return output_path
 
 
@@ -54,11 +63,12 @@ async def assemble(
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
             title_clip_path, "-y",
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await proc.communicate()
-        if proc.returncode == 0:
+        try:
+            await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Title card render")
             concat_entries.append(title_clip_path)
+        except (RuntimeError, TimeoutError):
+            # A failed/hung title card is non-fatal — continue without it.
+            pass
 
     for seg in voiced_segments:
         seg_id = seg["segment_id"]
@@ -101,11 +111,7 @@ async def assemble(
         "-movflags", "+faststart",
         final_video_path, "-y",
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Final concat failed: {stderr.decode()}")
+    await run_subprocess(cmd, timeout=CONCAT_TIMEOUT, label="Final concat")
 
     return {
         "final_video_path": final_video_path,

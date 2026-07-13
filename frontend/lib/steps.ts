@@ -1,5 +1,26 @@
 import type { StepDef, VideoFormat } from "./types"
 
+/**
+ * The real pipeline steps emitted by the FastAPI backend, in execution order.
+ * `id` matches the backend's `current_step` / `steps_completed` values exactly
+ * (see backend/pipeline/orchestrator.py). `label` is the human-facing status
+ * shown in the live progress card.
+ */
+export interface BackendStep {
+  id: string
+  label: string
+}
+
+export const BACKEND_STEPS: BackendStep[] = [
+  { id: "github_reader", label: "Analyzing repository structure" },
+  { id: "app_browser", label: "Navigating deployed site" },
+  { id: "script_writer", label: "Writing narration script" },
+  { id: "image_generator", label: "Designing title card" },
+  { id: "voice_generator", label: "Generating AI voiceover" },
+  { id: "video_assembler", label: "Assembling video, music & subtitles" },
+  { id: "storage", label: "Uploading & finalizing" },
+]
+
 export const STEP_DEFS: StepDef[] = [
   {
     id: "ingest",
@@ -33,14 +54,14 @@ export const STEP_DEFS: StepDef[] = [
     id: "capture",
     title: "Capture app walkthrough",
     description: "Drive the live deployment and record key UI flows as frames.",
-    provider: "Devfields",
+    provider: "Devsfield",
     duration: 3400,
   },
   {
     id: "compose",
     title: "Compose demo video",
     description: "Align scenes to narration, add captions, and render the cut.",
-    provider: "Devfields",
+    provider: "Devsfield",
     duration: 4200,
   },
   {
@@ -57,7 +78,7 @@ export const PRESENTER_STEP: StepDef = {
   id: "presenter",
   title: "Animate presenter",
   description: "Turn the uploaded photo into a lip-synced talking head, timed to the voiceover.",
-  provider: "Devfields",
+  provider: "Devsfield",
   duration: 3000,
 }
 
@@ -108,7 +129,7 @@ export function logsFor(
     ],
     voiceover: [
       "sending script to ElevenLabs",
-      "voice: Devfields Narrator",
+      "voice: Devsfield Narrator",
       "rendering 174s of audio @ 44.1kHz",
       "normalizing loudness to -16 LUFS",
     ],

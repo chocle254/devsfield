@@ -21,14 +21,14 @@ const plexMono = IBM_Plex_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Devfields — Ship your repo as a demo video",
+  title: "Devsfield — Ship your repo as a demo video",
   description:
-    "Devfields turns a GitHub repo and a deployed app URL into a polished 3-minute demo video. Automated AI pipeline with full asset provenance stored on Backblaze B2.",
+    "Devsfield turns a GitHub repo and a deployed app URL into a polished 3-minute demo video. Automated AI pipeline with full asset provenance stored on Backblaze B2.",
   generator: "v0.app",
 }
 
 export const viewport: Viewport = {
-  themeColor: "#08090C",
+  themeColor: "#f7f7fa",
   width: "device-width",
   initialScale: 1,
 }
