@@ -6,9 +6,14 @@ import { STEP_DEFS, STEP_DEF_BY_ID } from "@/lib/steps"
 import type { StepState } from "@/lib/types"
 
 interface StreamPayload {
+  // Backend sends "complete" | "failed" | "in_progress" | "queued".
+  // We normalise to the frontend vocabulary immediately after parsing.
   id: string
-  status: "running" | "done" | "error"
+  job_id?: string
+  status: "running" | "done" | "error" | "complete" | "in_progress" | "queued" | "failed"
   steps: StepState[]
+  steps_completed?: string[]
+  current_step?: string
   repoUrl: string
   appUrl: string
 }
@@ -22,14 +27,18 @@ export function PipelineView({ id }: { id: string }) {
   useEffect(() => {
     const es = new EventSource(`/api/stream/${id}`)
     es.onmessage = (e) => {
-      const payload = JSON.parse(e.data)
-      if (payload.error === "not_found") {
+      const raw = JSON.parse(e.data)
+      if (raw.error === "not_found" || raw.error === "Job not found") {
         setNotFound(true)
         es.close()
         return
       }
-      setData(payload)
-      if (payload.status === "done" && !redirected.current) {
+      // Normalise backend status vocabulary → frontend vocabulary
+      if (raw.status === "complete") raw.status = "done"
+      if (raw.status === "failed") raw.status = "error"
+      if (raw.status === "in_progress" || raw.status === "queued") raw.status = "running"
+      setData(raw)
+      if (raw.status === "done" && !redirected.current) {
         redirected.current = true
         es.close()
         setTimeout(() => router.push(`/result/${id}`), 900)
