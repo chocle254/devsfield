@@ -9,7 +9,7 @@ import httpx
 from genblaze_core import Pipeline, Modality
 from genblaze_elevenlabs import ElevenLabsTTSProvider
 
-MAX_CONCURRENT = 3
+MAX_CONCURRENT = 1
 
 TONE_VOICES: dict[str, str] = {
     "pitch": "pNInz6obpgDQGcFmaJgB",       # Adam
