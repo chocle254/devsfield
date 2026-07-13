@@ -33,31 +33,80 @@ export function PipelineView({ id }: { id: string }) {
   const latestSnapshotId = useRef<string | null>(null)
 
   useEffect(() => {
-    const es = new EventSource(`/api/stream/${id}`)
-    es.onmessage = (e) => {
-      const raw = JSON.parse(e.data)
-      if (raw.error === "not_found" || raw.error === "Job not found") {
-        setNotFound(true)
-        es.close()
-        return
-      }
-      const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
-      if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
-        latestSnapshotId.current = latestSnapshot.id
-        setSelectedSnapshotId(latestSnapshot.id)
-      }
-      setData(raw)
-      if (raw.status === "complete" && !redirected.current) {
-        redirected.current = true
-        es.close()
-        setTimeout(() => router.push(`/result/${id}`), 900)
-      }
-      if (raw.status === "failed") {
-        es.close()
+    let es: EventSource | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    // Once the run reaches a terminal state (done / failed / not found) we stop
+    // reconnecting. While it is still in progress we always try to reconnect,
+    // because the job keeps running on the server even if this tab is
+    // backgrounded, throttled, or the connection is dropped.
+    let stopped = false
+
+    const clearReconnect = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
       }
     }
-    es.onerror = () => es.close()
-    return () => es.close()
+
+    const connect = () => {
+      if (stopped) return
+      es?.close()
+      es = new EventSource(`/api/stream/${id}`)
+
+      es.onmessage = (e) => {
+        const raw = JSON.parse(e.data)
+        if (raw.error === "not_found" || raw.error === "Job not found") {
+          setNotFound(true)
+          stopped = true
+          es?.close()
+          return
+        }
+        const latestSnapshot = raw.snapshots?.at(-1) as NavigationSnapshot | undefined
+        if (latestSnapshot && latestSnapshot.id !== latestSnapshotId.current) {
+          latestSnapshotId.current = latestSnapshot.id
+          setSelectedSnapshotId(latestSnapshot.id)
+        }
+        setData(raw)
+        if (raw.status === "complete" && !redirected.current) {
+          redirected.current = true
+          stopped = true
+          es?.close()
+          setTimeout(() => router.push(`/result/${id}`), 900)
+        }
+        if (raw.status === "failed") {
+          stopped = true
+          es?.close()
+        }
+      }
+
+      es.onerror = () => {
+        // The tab was likely backgrounded/suspended or the network blipped.
+        // Reconnect (unless we're already done) to resync with the server.
+        es?.close()
+        if (stopped) return
+        clearReconnect()
+        reconnectTimer = setTimeout(connect, 2000)
+      }
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && !stopped) {
+        // Reconnect immediately when the user returns to the tab instead of
+        // waiting for the backoff timer, so progress catches up right away.
+        clearReconnect()
+        connect()
+      }
+    }
+
+    connect()
+    document.addEventListener("visibilitychange", handleVisibility)
+
+    return () => {
+      stopped = true
+      clearReconnect()
+      document.removeEventListener("visibilitychange", handleVisibility)
+      es?.close()
+    }
   }, [id, router])
 
   if (notFound) {

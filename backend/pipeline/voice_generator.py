@@ -4,12 +4,38 @@ Generates one voiceover clip per script segment, using genblaze-elevenlabs.
 import asyncio
 import os
 import re
+import shutil
+from urllib.parse import urlparse
 
 import httpx
 from genblaze_core import Pipeline, Modality
 from genblaze_elevenlabs import ElevenLabsTTSProvider
 
 MAX_CONCURRENT = 1
+
+
+async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.0) -> None:
+    """
+    genblaze providers may return either a remote http(s) URL or a local
+    filesystem path (when given an output_dir). Handle both so we never feed a
+    bare path into httpx, which raises
+    "Request URL is missing an 'http://' or 'https://' protocol".
+    """
+    parsed = urlparse(asset_url)
+    if parsed.scheme in ("http", "https"):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(asset_url)
+            r.raise_for_status()
+            with open(dest_path, "wb") as f:
+                f.write(r.content)
+        return
+
+    # Local file (possibly a file:// URL). Copy it into the expected location.
+    src = parsed.path if parsed.scheme == "file" else asset_url
+    if not os.path.exists(src):
+        raise RuntimeError(f"Generated asset not found on disk: {src}")
+    if os.path.abspath(src) != os.path.abspath(dest_path):
+        shutil.copyfile(src, dest_path)
 
 TONE_VOICES: dict[str, str] = {
     "pitch": "pNInz6obpgDQGcFmaJgB",       # Adam
@@ -66,11 +92,7 @@ async def generate_segment_voices(script_segments: list[dict],
                 _generate_one, job_id, segment_id, text, voice_id)
 
             audio_path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.get(asset_url)
-                r.raise_for_status()
-                with open(audio_path, "wb") as f:
-                    f.write(r.content)
+            await materialize_asset(asset_url, audio_path, timeout=60.0)
 
         return {**seg, "text": text, "audio_path": audio_path}
 
