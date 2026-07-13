@@ -6,9 +6,10 @@ import os
 import logging
 from typing import Optional
 
-import httpx
 from genblaze_core import Pipeline, Modality
 from genblaze_gmicloud import GMICloudImageProvider
+
+from .voice_generator import materialize_asset
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +45,7 @@ async def generate_title_card(repo_name: str, description: str, job_id: str) -> 
             return None
 
         image_path = f"/tmp/titlecard_{job_id}.png"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(step.assets[0].url)
-            with open(image_path, "wb") as f:
-                f.write(r.content)
+        await materialize_asset(step.assets[0].url, image_path, timeout=30.0)
 
         return image_path
 
