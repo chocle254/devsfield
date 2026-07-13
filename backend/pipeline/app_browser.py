@@ -27,7 +27,7 @@ from urllib.parse import urldefrag
 import httpx
 from playwright.async_api import async_playwright
 
-from jobs import add_snapshot, add_tmp_file
+from jobs import add_snapshot, add_tmp_file, set_activity
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3-0324"
@@ -386,6 +386,8 @@ async def record_app(app_url: str, repo_context: dict = None,
             def elapsed() -> float:
                 return time.monotonic() - recording_start
 
+            if job_id:
+                await set_activity(job_id, "Opening the first page")
             if not await _safe_goto(page, app_url):
                 raise RuntimeError(
                     f"Could not load {app_url} — the app did not respond "

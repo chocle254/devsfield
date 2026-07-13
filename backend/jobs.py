@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 # Global jobs dict stores all job state
@@ -15,6 +16,9 @@ async def create_job(job_id: str) -> None:
             "current_step": None,
             "steps_completed": [],
             "message": None,
+            "activity": "Waiting to start",
+            "activity_seq": 0,
+            "activity_updated_at": datetime.now(timezone.utc).isoformat(),
             "error": None,
             "result": None,
             "tmp_files": [],
@@ -36,6 +40,18 @@ async def set_step(job_id: str, step: str, message: str) -> None:
             jobs[job_id]["current_step"] = step
             jobs[job_id]["status"] = "in_progress"
             jobs[job_id]["message"] = message
+            jobs[job_id]["activity"] = message
+            jobs[job_id]["activity_seq"] += 1
+            jobs[job_id]["activity_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def set_activity(job_id: str, activity: str) -> None:
+    """Publish truthful fine-grained progress without changing the step."""
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["activity"] = activity
+            jobs[job_id]["activity_seq"] += 1
+            jobs[job_id]["activity_updated_at"] = datetime.now(timezone.utc).isoformat()
 
 
 async def complete_step(job_id: str, step: str) -> None:
