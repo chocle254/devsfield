@@ -16,6 +16,16 @@ const TEMPLATES = [
   { value: "pitch_demo", label: "Pitch + demo" },
 ]
 
+// Selectable voices sent to the backend as the `voice` field. "default" lets
+// the backend fall back to the tone-based voice. The named voices resolve to
+// ElevenLabs voice IDs configured in backend/pipeline/voice_generator.py.
+const VOICES = [
+  { value: "default", label: "Default" },
+  { value: "lamin", label: "Lamin" },
+  { value: "julius", label: "Julius" },
+  { value: "sinclair", label: "Sinclair" },
+]
+
 interface UrlInputFormProps {
   onStarted: (id: string) => void
   running: boolean
@@ -26,6 +36,7 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
   const [appUrl, setAppUrl] = useState("")
   const [maxDurationSec, setMaxDurationSec] = useState(180)
   const [tone, setTone] = useState("pitch")
+  const [voice, setVoice] = useState("default")
   const [loginOn, setLoginOn] = useState(false)
   const [loginUsername, setLoginUsername] = useState("")
   const [loginPassword, setLoginPassword] = useState("")
@@ -49,6 +60,7 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
           options: {
             maxDurationSec,
             tone,
+            voice: voice === "default" ? undefined : voice,
             credentials:
               loginOn && loginUsername && loginPassword
                 ? { username: loginUsername, password: loginPassword }
@@ -75,6 +87,7 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
     setAppUrl("")
     setMaxDurationSec(180)
     setTone("pitch")
+    setVoice("default")
     setLoginOn(false)
     setLoginUsername("")
     setLoginPassword("")
@@ -156,10 +169,22 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
             <SelectShell disabled>English</SelectShell>
           </div>
           <div>
-            <FieldLabel>
-              Voice <SoonBadge />
-            </FieldLabel>
-            <SelectShell disabled>Default</SelectShell>
+            <FieldLabel>Voice</FieldLabel>
+            <div className="relative">
+              <select
+                value={voice}
+                disabled={disabled}
+                onChange={(e) => setVoice(e.target.value)}
+                className="w-full appearance-none rounded-lg border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-ring disabled:opacity-60"
+              >
+                {VOICES.map((v) => (
+                  <option key={v.value} value={v.value}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronIcon />
+            </div>
           </div>
         </div>
 
