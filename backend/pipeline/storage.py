@@ -40,17 +40,81 @@ def make_b2_backend() -> S3StorageBackend:
         b2_bucket, region=b2_region, public_url_base=b2_public_url)
 
 
+# Presigned URLs are minted at read time (see resolve_result_urls). B2 caps a
+# presigned GET at 7 days, so we sign for the max — but because every /result
+# call re-signs, the effective lifetime is unbounded for anyone actively using
+# the app or a share link.
+_PRESIGN_TTL_SEC = 7 * 24 * 3600
+
+
+def _url_for(backend, key: str) -> str:
+    """Return a browser-loadable URL for a stored object key.
+
+    Since genblaze 0.3.0 ``backend.put`` returns the *key*, not a URL, so we
+    must derive the URL ourselves. When a public CDN base (``B2_PUBLIC_URL``)
+    is configured we hand out a credential-free durable URL; otherwise the
+    bucket is private and we mint a presigned GET so the ``<video>`` element
+    can actually fetch the file instead of 404ing on a bare key.
+    """
+    if os.environ.get("B2_PUBLIC_URL"):
+        return backend.get_durable_url(key)
+    return backend.presigned_get_url(key, expires_in=_PRESIGN_TTL_SEC)
+
+
+async def resolve_result_urls(result: dict) -> dict:
+    """Re-mint fresh, loadable URLs for a stored result from its keys.
+
+    Results persist only the stable object *keys*; the actual URLs (which may
+    be short-lived presigned links) are regenerated on every read so the video
+    and assets never go stale. Best-effort: if B2 is unreachable we return the
+    result untouched so the rest of the page still renders.
+    """
+    if not result:
+        return result
+    try:
+        backend = make_b2_backend()
+    except Exception:
+        return result
+    try:
+        out = dict(result)
+        if result.get("video_key"):
+            out["video_url"] = await asyncio.to_thread(_url_for, backend, result["video_key"])
+        if result.get("manifest_key"):
+            out["manifest_url"] = await asyncio.to_thread(_url_for, backend, result["manifest_key"])
+        if result.get("segments_key"):
+            out["segments_url"] = await asyncio.to_thread(_url_for, backend, result["segments_key"])
+        segs = result.get("segments")
+        if isinstance(segs, list):
+            resolved = []
+            for seg in segs:
+                s = dict(seg)
+                if seg.get("clip_key"):
+                    s["clip_url"] = await asyncio.to_thread(_url_for, backend, seg["clip_key"])
+                if seg.get("voice_key"):
+                    s["voice_url"] = await asyncio.to_thread(_url_for, backend, seg["voice_key"])
+                resolved.append(s)
+            out["segments"] = resolved
+        return out
+    except Exception:
+        return result
+    finally:
+        try:
+            backend.close()
+        except Exception:
+            pass
+
+
 async def upload_all(job_id: str, final_video_path: str,
                       segment_clips: list[dict]) -> dict:
-    b2_public_url = os.environ.get("B2_PUBLIC_URL", "")
     backend = make_b2_backend()
 
     # Upload final video
     with open(final_video_path, "rb") as f:
         video_data = f.read()
     video_key = f"jobs/{job_id}/final_video.mp4"
-    video_url = await asyncio.to_thread(
+    await asyncio.to_thread(
         backend.put, video_key, video_data, content_type="video/mp4")
+    video_url = await asyncio.to_thread(_url_for, backend, video_key)
 
     # Upload each segment's clip + voice individually — this is what
     # enables editing a single segment later without touching the rest
@@ -61,28 +125,31 @@ async def upload_all(job_id: str, final_video_path: str,
         with open(seg["merged_path"], "rb") as f:
             clip_data = f.read()
         clip_key = f"jobs/{job_id}/segments/{seg_id}/clip.mp4"
-        clip_url = await asyncio.to_thread(
+        await asyncio.to_thread(
             backend.put, clip_key, clip_data, content_type="video/mp4")
+        clip_url = await asyncio.to_thread(_url_for, backend, clip_key)
 
         with open(seg["voice_path"], "rb") as f:
             voice_data = f.read()
         voice_key = f"jobs/{job_id}/segments/{seg_id}/voice.mp3"
-        voice_url = await asyncio.to_thread(
+        await asyncio.to_thread(
             backend.put, voice_key, voice_data, content_type="audio/mpeg")
+        voice_url = await asyncio.to_thread(_url_for, backend, voice_key)
 
         segment_manifest.append({
             "segment_id": seg_id,
             "clip_key": clip_key,
-            "clip_url": clip_url or f"{b2_public_url}/{clip_key}",
+            "clip_url": clip_url,
             "voice_key": voice_key,
-            "voice_url": voice_url or f"{b2_public_url}/{voice_key}",
+            "voice_url": voice_url,
         })
 
     # Upload segment manifest — the foundation for chat-based editing later
     segments_json = json.dumps(segment_manifest, indent=2).encode()
     segments_key = f"jobs/{job_id}/segments_manifest.json"
-    segments_url = await asyncio.to_thread(
+    await asyncio.to_thread(
         backend.put, segments_key, segments_json, content_type="application/json")
+    segments_url = await asyncio.to_thread(_url_for, backend, segments_key)
 
     # Provenance manifest
     manifest = {
@@ -101,15 +168,22 @@ async def upload_all(job_id: str, final_video_path: str,
     }
     manifest_json = json.dumps(manifest, indent=2).encode()
     manifest_key = f"jobs/{job_id}/manifest.json"
-    manifest_url = await asyncio.to_thread(
+    await asyncio.to_thread(
         backend.put, manifest_key, manifest_json, content_type="application/json")
+    manifest_url = await asyncio.to_thread(_url_for, backend, manifest_key)
 
     backend.close()
 
+    # Persist stable object *keys* alongside the freshly-minted URLs. The URLs
+    # are re-generated on every read (resolve_result_urls) so they never expire
+    # from the user's perspective, while the keys are what survive restarts.
     return {
-        "video_url": video_url or f"{b2_public_url}/{video_key}",
-        "manifest_url": manifest_url or f"{b2_public_url}/{manifest_key}",
-        "segments_url": segments_url or f"{b2_public_url}/{segments_key}",
+        "video_key": video_key,
+        "manifest_key": manifest_key,
+        "segments_key": segments_key,
+        "video_url": video_url,
+        "manifest_url": manifest_url,
+        "segments_url": segments_url,
         "segments": segment_manifest,
         "sha256": manifest["sha256"],
         "models_used": manifest["models_used"],

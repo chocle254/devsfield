@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from models import GenerateRequest, JobStatus, JobResult
 from jobs import create_job, get_job, get_snapshot, reset_for_retry, restore_job
-from pipeline import resume_store
+from pipeline import resume_store, storage
 from pipeline.orchestrator import run_pipeline
 
 load_dotenv()
@@ -173,7 +173,10 @@ async def get_result(job_id: str):
     if job["status"] != "complete":
         return {"status": job["status"], "message": "Job not complete yet"}
 
-    result = job.get("result") or {}
+    # Re-mint fresh, browser-loadable URLs from the stored object keys. Stored
+    # URLs may be expired presigned links (e.g. after a restart), so we always
+    # regenerate on read.
+    result = await storage.resolve_result_urls(job.get("result") or {})
     return JobResult(
         job_id=job_id,
         status=job["status"],
