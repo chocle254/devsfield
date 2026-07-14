@@ -15,6 +15,7 @@ class GenerateRequest(BaseModel):
     app_url: str
     video_length: int = Field(default=180, ge=60, le=300)
     tone: str = Field(default="pitch")  # "pitch", "pitch_demo", "demo", or "technical"
+    voice: Optional[str] = None
     credentials: Optional[AppCredentials] = None
 
 
