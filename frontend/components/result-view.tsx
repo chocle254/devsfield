@@ -109,9 +109,11 @@ export function ResultView({ id }: { id: string }) {
           <span className="inline-flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 font-mono text-[11px] text-muted-foreground">
             {r.format === "pitch_demo" ? "pitch + demo" : "demo"}
           </span>
+          {/* Same-origin proxy: browsers ignore `download` on cross-origin
+              (B2) links, so we stream the file through our own route with a
+              Content-Disposition attachment header instead. */}
           <a
-            href={r.videoUrl}
-            download
+            href={`/api/download/${id}`}
             className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 sm:flex-none"
           >
             <DownloadIcon /> Download MP4

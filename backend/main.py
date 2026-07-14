@@ -165,29 +165,65 @@ async def get_status(job_id: str) -> JobStatus:
 
 @app.get("/result/{job_id}")
 async def get_result(job_id: str):
-    """Get the final result of a completed job."""
-    job = await get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """Get the final result of a completed job.
 
-    if job["status"] != "complete":
-        return {"status": job["status"], "message": "Job not complete yet"}
+    Works even after a page refresh or backend redeploy: if the job is gone
+    from memory (or was never complete in this process), we reconstruct the
+    completed result straight from the durable B2 manifest.
+    """
+    job = await get_job(job_id)
+    result = None
+
+    if job is not None and job.get("status") == "complete":
+        result = job.get("result") or {}
+    else:
+        # Not in memory / not complete here — try the durable manifest on B2.
+        result = await storage.load_result_from_b2(job_id)
+        if result is None:
+            if job is not None:
+                # In memory but still running/failed: report live status.
+                return {"status": job["status"], "message": "Job not complete yet"}
+            raise HTTPException(status_code=404, detail="Job not found")
 
     # Re-mint fresh, browser-loadable URLs from the stored object keys. Stored
     # URLs may be expired presigned links (e.g. after a restart), so we always
     # regenerate on read.
-    result = await storage.resolve_result_urls(job.get("result") or {})
+    result = await storage.resolve_result_urls(result)
     return JobResult(
         job_id=job_id,
-        status=job["status"],
+        status="complete",
         video_url=result.get("video_url"),
         manifest_url=result.get("manifest_url"),
-        segments_url=result.get("segments_url"),   # NEW
-        segments=result.get("segments"),            # NEW
+        segments_url=result.get("segments_url"),
+        segments=result.get("segments"),
+        github_url=result.get("github_url"),
+        app_url=result.get("app_url"),
+        repo_name=result.get("repo_name"),
+        tone=result.get("tone"),
+        duration_seconds=result.get("duration_seconds"),
         sha256=result.get("sha256"),
         models_used=result.get("models_used"),
         generated_at=result.get("generated_at"),
     )
+
+
+@app.get("/library")
+async def get_library():
+    """List all completed videos found on Backblaze B2 (newest first).
+
+    Reads each job's manifest.json, so the library is complete regardless of
+    in-memory state — survives refreshes and redeploys.
+    """
+    return {"videos": await storage.list_library()}
+
+
+@app.delete("/library/{job_id}")
+async def delete_library_item(job_id: str):
+    """Permanently delete a video and all its assets from B2. Irreversible."""
+    ok = await storage.delete_job(job_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to delete video")
+    return {"job_id": job_id, "deleted": True}
 
 
 async def sse_generator(job_id: str):
