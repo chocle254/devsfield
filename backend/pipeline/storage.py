@@ -339,7 +339,89 @@ async def list_library() -> list[dict]:
             await asyncio.to_thread(backend.close)
         except Exception:
             pass
+            
+async def get_glued_download_url(job_id: str) -> str | None:
+    """Return a URL to the full video with every segment glued together.
 
+    The stored ``final_video.mp4`` was produced by the pipeline; if it looks
+    truncated (or you simply always want the segments re-glued at download
+    time), this rebuilds one continuous MP4 from the per-segment clips —
+    played back to back, with each segment's voiceover, no black frames — and
+    caches it on B2 as ``final_glued.mp4`` so repeat downloads are instant.
+
+    Returns a fresh, browser-loadable URL, or None if the job has no segments
+    to glue (in which case callers fall back to the original video).
+    """
+    backend = make_b2_backend()
+    tmp_files: list[str] = []
+    try:
+        # Serve the cached glued video if we've already built it. We probe the
+        # object with a lightweight get; if it's present we just re-mint a URL
+        # for the existing key instead of rebuilding.
+        glued_key = f"jobs/{job_id}/final_glued.mp4"
+        try:
+            await asyncio.to_thread(backend.get, glued_key)
+            return await asyncio.to_thread(_url_for, backend, glued_key)
+        except Exception:
+            pass  # not built yet — fall through and build it
+
+        # Load the segment manifest (ordered per-segment clip keys).
+        seg_key = f"jobs/{job_id}/segments_manifest.json"
+        try:
+            seg_raw = await asyncio.to_thread(backend.get, seg_key)
+            segments = json.loads(seg_raw)
+        except Exception:
+            return None
+        if not isinstance(segments, list) or not segments:
+            return None
+
+        segments = sorted(segments, key=lambda s: s.get("segment_id", 0))
+
+        # Import here to avoid any import cycle at module load time.
+        from pipeline import video_assembler
+
+        normalized_paths: list[str] = []
+        for seg in segments:
+            clip_key = seg.get("clip_key")
+            if not clip_key:
+                continue
+            seg_id = seg.get("segment_id", len(normalized_paths))
+            raw_path = f"/tmp/dl_{job_id}_seg{seg_id}.mp4"
+            data = await asyncio.to_thread(backend.get, clip_key)
+            with open(raw_path, "wb") as f:
+                f.write(data)
+            tmp_files.append(raw_path)
+
+            norm_path = f"/tmp/dlnorm_{job_id}_seg{seg_id}.mp4"
+            await video_assembler.normalize_clip(raw_path, norm_path)
+            tmp_files.append(norm_path)
+            normalized_paths.append(norm_path)
+
+        if not normalized_paths:
+            return None
+
+        glued_path = f"/tmp/glued_{job_id}.mp4"
+        tmp_files.append(glued_path)
+        await video_assembler.concat_segments(normalized_paths, glued_path, job_id)
+
+        with open(glued_path, "rb") as f:
+            glued_data = f.read()
+        await asyncio.to_thread(
+            backend.put, glued_key, glued_data, content_type="video/mp4")
+        return await asyncio.to_thread(_url_for, backend, glued_key)
+    except Exception:
+        return None
+    finally:
+        for p in tmp_files:
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        try:
+            await asyncio.to_thread(backend.close)
+        except Exception:
+            pass
 
 async def delete_job(job_id: str) -> bool:
     """Permanently delete all B2 objects for a job (jobs/{job_id}/...).
