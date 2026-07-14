@@ -22,6 +22,8 @@ type RequestBody = {
   options?: {
     maxDurationSec?: number
     tone?: string
+    /** named voice (e.g. "lamin", "julius", "sinclair") sent to the backend */
+    voice?: string
     /** @deprecated legacy field from the old mock form, mapped to `tone` below */
     format?: string
     /** optional demo-account login for apps behind authentication */
@@ -71,6 +73,12 @@ export async function POST(req: Request) {
     tone = "pitch"
   }
 
+  // Optional named voice: only forward a known value so the backend falls
+  // back to its tone-based default for anything unexpected.
+  const ALLOWED_VOICES = ["lamin", "julius", "sinclair"]
+  const rawVoice = body.options?.voice?.trim().toLowerCase()
+  const voice = rawVoice && ALLOWED_VOICES.includes(rawVoice) ? rawVoice : undefined
+
   // Optional demo login: only forwarded when both fields are present.
   // Passed straight through to the backend for the recording session —
   // never logged or persisted here.
@@ -90,6 +98,7 @@ export async function POST(req: Request) {
         app_url: appUrl,
         video_length,
         tone,
+        voice,
         credentials,
       }),
     })
