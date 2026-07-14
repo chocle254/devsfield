@@ -26,7 +26,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // 1. Ask the backend for the current (freshly-signed) video URL.
   let resultRes: Response
   try {
-    resultRes = await fetch(`${backendUrl}/result/${id}`, { cache: "no-store" })
+    resultRes = await fetch(`${backendUrl}/download/${id}`, { cache: "no-store" })
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "unknown error"
     return NextResponse.json({ error: `Could not reach backend: ${message}` }, { status: 502 })
