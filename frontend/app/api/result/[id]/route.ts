@@ -142,6 +142,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const result = {
     videoUrl: data.video_url ?? "",
+    clipUrls,
     posterUrl: "/demo-poster.png",
     durationSec,
     title: `${repoName} — Demo`,
