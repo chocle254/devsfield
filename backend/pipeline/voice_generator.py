@@ -51,9 +51,9 @@ DEFAULT_VOICE = TONE_VOICES["pitch"]
 #
 # >>> Paste the real ElevenLabs voice IDs below. <<<
 NAMED_VOICES: dict[str, str] = {
-    "lamin": "REPLACE_WITH_LAMIN_VOICE_ID",
-    "julius": "REPLACE_WITH_JULIUS_VOICE_ID",
-    "sinclair": "REPLACE_WITH_SINCLAIR_VOICE_ID",
+    "lamin": "hILdTfuUq4LRBMrxHERr",
+    "julius": "VlUmeC1Uzj3NnwiVR9K9",
+    "sinclair": "fx5le4FFKvx12m8z2cAr",
 }
 
 
