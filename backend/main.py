@@ -207,6 +207,27 @@ async def get_result(job_id: str):
     )
 
 
+@app.get("/download/{job_id}")
+async def get_download(job_id: str):
+    """Return a URL to the full video with all segments glued together.
+
+    The player streams the segment clips back-to-back, but the *download* is a
+    single continuous MP4. We build it on demand from the stored per-segment
+    clips (each with its own voiceover, no black frames) and cache it on B2.
+    Falls back to the original final video if gluing isn't possible.
+    """
+    glued_url = await storage.get_glued_download_url(job_id)
+    if glued_url:
+        return {"job_id": job_id, "video_url": glued_url}
+
+    # Fallback: hand back the original final video.
+    result = await storage.load_result_from_b2(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = await storage.resolve_result_urls(result)
+    return {"job_id": job_id, "video_url": result.get("video_url")}
+
+
 @app.get("/library")
 async def get_library():
     """List all completed videos found on Backblaze B2 (newest first).
