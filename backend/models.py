@@ -44,8 +44,12 @@ class JobResult(BaseModel):
     status: str
     video_url: Optional[str] = None
     manifest_url: Optional[str] = None
-    segments_url: Optional[str] = None      # NEW
-    segments: Optional[list[dict]] = None   # NEW
+    segments_url: Optional[str] = None
+    segments: Optional[list[dict]] = None
+    github_url: Optional[str] = None        # library metadata
+    app_url: Optional[str] = None           # library metadata
+    repo_name: Optional[str] = None         # library metadata
+    tone: Optional[str] = None              # library metadata
     sha256: Optional[str] = None
     models_used: Optional[dict] = None
     duration_seconds: Optional[int] = None

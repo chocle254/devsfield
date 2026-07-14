@@ -144,7 +144,8 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
         # 7. Upload everything to Backblaze B2 (terminal step, no checkpoint)
         await set_step(job_id, "storage", "Uploading to Backblaze B2...")
         result = await storage.upload_all(
-            job_id, assembly["final_video_path"], assembly["segment_clips"])
+            job_id, assembly["final_video_path"], assembly["segment_clips"],
+            request=request, duration_seconds=getattr(request, "video_length", None))
         await complete_step(job_id, "storage")
 
         await complete_job(job_id, result)

@@ -9,10 +9,12 @@ export function SiteHeader() {
           <span className="text-lg font-bold tracking-tight text-primary">Devsfield</span>
         </Link>
         <div className="flex items-center gap-3">
-          <span className="hidden items-center gap-2 text-sm text-muted-foreground sm:flex">
-            <UserIcon />
-            Devsfield Studio
-          </span>
+          <Link
+            href="/library"
+            className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            My videos
+          </Link>
           <Link
             href="/#start"
             className="rounded-lg bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
@@ -39,11 +41,3 @@ export function Logo({ className = "" }: { className?: string }) {
   )
 }
 
-function UserIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
-    </svg>
-  )
-}

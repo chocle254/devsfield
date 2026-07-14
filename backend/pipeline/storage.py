@@ -104,8 +104,19 @@ async def resolve_result_urls(result: dict) -> dict:
             pass
 
 
+def _repo_name(github_url: str) -> str:
+    """Derive a friendly repo name (owner/repo → repo) for library display."""
+    if not github_url:
+        return ""
+    slug = github_url.rstrip("/").split("github.com/")[-1]
+    slug = slug.removesuffix(".git")
+    parts = [p for p in slug.split("/") if p]
+    return parts[-1] if parts else slug
+
+
 async def upload_all(job_id: str, final_video_path: str,
-                      segment_clips: list[dict]) -> dict:
+                      segment_clips: list[dict],
+                      request=None, duration_seconds: int = None) -> dict:
     backend = make_b2_backend()
 
     # Upload final video
@@ -151,11 +162,25 @@ async def upload_all(job_id: str, final_video_path: str,
         backend.put, segments_key, segments_json, content_type="application/json")
     segments_url = await asyncio.to_thread(_url_for, backend, segments_key)
 
+    # Library metadata pulled from the originating request. Stored in the
+    # manifest so the /library listing can label each video (repo, app URL,
+    # duration, tone) without any in-memory job state — it survives restarts.
+    github_url = getattr(request, "github_url", "") if request else ""
+    app_url = getattr(request, "app_url", "") if request else ""
+    tone = getattr(request, "tone", None) if request else None
+    if duration_seconds is None and request is not None:
+        duration_seconds = getattr(request, "video_length", None)
+
     # Provenance manifest
     manifest = {
         "job_id": job_id,
         "video_key": video_key,
         "segments_key": segments_key,
+        "github_url": github_url,
+        "app_url": app_url,
+        "repo_name": _repo_name(github_url),
+        "tone": tone,
+        "duration_seconds": duration_seconds,
         "sha256": _sha256_file(final_video_path),
         "models_used": {
             "llm": "deepseek-ai/DeepSeek-V3-0324 via GMI Cloud",
@@ -185,7 +210,151 @@ async def upload_all(job_id: str, final_video_path: str,
         "manifest_url": manifest_url,
         "segments_url": segments_url,
         "segments": segment_manifest,
+        "github_url": manifest["github_url"],
+        "app_url": manifest["app_url"],
+        "repo_name": manifest["repo_name"],
+        "tone": manifest["tone"],
+        "duration_seconds": manifest["duration_seconds"],
         "sha256": manifest["sha256"],
         "models_used": manifest["models_used"],
         "generated_at": manifest["generated_at"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Library: reconstruct completed results from B2 (survives refresh / redeploy)
+# ---------------------------------------------------------------------------
+
+def _result_from_manifest(manifest: dict, segments: list = None) -> dict:
+    """Build a JobResult-shaped dict from a stored manifest (+ optional segments).
+
+    Contains only stable object *keys*; call resolve_result_urls() to mint
+    fresh browser-loadable URLs before returning to a client.
+    """
+    return {
+        "video_key": manifest.get("video_key"),
+        "manifest_key": manifest.get("manifest_key")
+            or f"jobs/{manifest.get('job_id')}/manifest.json",
+        "segments_key": manifest.get("segments_key"),
+        "segments": segments or [],
+        "github_url": manifest.get("github_url", ""),
+        "app_url": manifest.get("app_url", ""),
+        "repo_name": manifest.get("repo_name", ""),
+        "tone": manifest.get("tone"),
+        "duration_seconds": manifest.get("duration_seconds"),
+        "sha256": manifest.get("sha256"),
+        "models_used": manifest.get("models_used"),
+        "generated_at": manifest.get("generated_at"),
+    }
+
+
+async def load_result_from_b2(job_id: str) -> dict | None:
+    """Reconstruct a completed job's result purely from its B2 manifest.
+
+    Lets /result work after the in-memory job is gone (page refresh, backend
+    redeploy). Returns None if this job has no final manifest on B2 (i.e. it
+    never completed). URLs are NOT resolved here — the caller does that.
+    """
+    backend = make_b2_backend()
+    try:
+        manifest_key = f"jobs/{job_id}/manifest.json"
+        try:
+            raw = await asyncio.to_thread(backend.get, manifest_key)
+        except Exception:
+            return None
+        try:
+            manifest = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        manifest.setdefault("manifest_key", manifest_key)
+
+        segments = []
+        seg_key = manifest.get("segments_key") or f"jobs/{job_id}/segments_manifest.json"
+        try:
+            seg_raw = await asyncio.to_thread(backend.get, seg_key)
+            segments = json.loads(seg_raw)
+        except Exception:
+            segments = []
+
+        return _result_from_manifest(manifest, segments)
+    finally:
+        try:
+            await asyncio.to_thread(backend.close)
+        except Exception:
+            pass
+
+
+async def list_library() -> list[dict]:
+    """List every completed video by reading each job's manifest.json from B2.
+
+    Independent of in-memory state, so the library is complete after any
+    refresh or redeploy. Each entry has enough to render a card plus a fresh
+    playable/downloadable video URL. Sorted newest-first.
+    """
+    backend = make_b2_backend()
+    items: list[dict] = []
+    try:
+        # Enumerate all manifest.json keys under jobs/ (paginated).
+        manifest_keys: list[str] = []
+        token = None
+        while True:
+            page = await asyncio.to_thread(
+                backend.list, "jobs/", continuation_token=token)
+            for entry in page.entries:
+                if entry.key.endswith("/manifest.json"):
+                    manifest_keys.append(entry.key)
+            token = page.next_token
+            if not token:
+                break
+
+        for mkey in manifest_keys:
+            try:
+                raw = await asyncio.to_thread(backend.get, mkey)
+                manifest = json.loads(raw)
+            except Exception:
+                continue
+            manifest.setdefault("manifest_key", mkey)
+            job_id = manifest.get("job_id") or mkey.split("/")[1]
+            video_key = manifest.get("video_key") or f"jobs/{job_id}/final_video.mp4"
+            try:
+                video_url = await asyncio.to_thread(_url_for, backend, video_key)
+            except Exception:
+                video_url = None
+            items.append({
+                "job_id": job_id,
+                "repo_name": manifest.get("repo_name", ""),
+                "github_url": manifest.get("github_url", ""),
+                "app_url": manifest.get("app_url", ""),
+                "tone": manifest.get("tone"),
+                "duration_seconds": manifest.get("duration_seconds"),
+                "generated_at": manifest.get("generated_at"),
+                "video_url": video_url,
+                "status": "complete",
+            })
+
+        items.sort(key=lambda x: x.get("generated_at") or "", reverse=True)
+        return items
+    finally:
+        try:
+            await asyncio.to_thread(backend.close)
+        except Exception:
+            pass
+
+
+async def delete_job(job_id: str) -> bool:
+    """Permanently delete all B2 objects for a job (jobs/{job_id}/...).
+
+    Irreversible. Returns True on success. Used by the library Delete action.
+    """
+    backend = make_b2_backend()
+    try:
+        await asyncio.to_thread(
+            backend.delete_prefix, f"jobs/{job_id}/", dry_run=False)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            await asyncio.to_thread(backend.close)
+        except Exception:
+            pass
