@@ -86,12 +86,14 @@ export function ResultView({ id }: { id: string }) {
       {/* Player + actions — mobile: 1st, desktop: top-left */}
       <div className="lg:col-span-3 lg:col-start-1 lg:row-start-1">
         <div className="relative overflow-hidden rounded-xl border border-border bg-black">
+          {/* No crossOrigin: the video is never drawn to a canvas, and setting
+              it would force a CORS check that a private presigned B2 URL
+              (without bucket CORS rules) would fail — blocking playback. */}
           <video
             key={r.videoUrl}
             controls
             poster={r.posterUrl}
             preload="metadata"
-            crossOrigin="anonymous"
             className="aspect-video w-full bg-black"
           >
             <source src={r.videoUrl} type="video/mp4" />
