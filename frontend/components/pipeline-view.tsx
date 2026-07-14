@@ -29,8 +29,35 @@ export function PipelineView({ id }: { id: string }) {
   const [data, setData] = useState<StreamPayload | null>(null)
   const [notFound, setNotFound] = useState(false)
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  // Bumping this re-runs the streaming effect with a fresh connection, which
+  // is how we resume watching progress after a retry.
+  const [retryNonce, setRetryNonce] = useState(0)
   const redirected = useRef(false)
   const latestSnapshotId = useRef<string | null>(null)
+
+  async function handleRetry() {
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      const res = await fetch(`/api/retry/${id}`, { method: "POST" })
+      const payload = await res.json().catch(() => null)
+      if (!res.ok) {
+        setRetryError(payload?.error ?? "Could not retry this run. Please try again.")
+        return
+      }
+      // Resume: clear the failed state and reconnect to the stream. The backend
+      // continues from the step that broke, reusing completed work.
+      redirected.current = false
+      setData((prev) => (prev ? { ...prev, status: "in_progress", error: null } : prev))
+      setRetryNonce((n) => n + 1)
+    } catch {
+      setRetryError("Could not reach the server. Please try again.")
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -107,7 +134,7 @@ export function PipelineView({ id }: { id: string }) {
       document.removeEventListener("visibilitychange", handleVisibility)
       es?.close()
     }
-  }, [id, router])
+  }, [id, router, retryNonce])
 
   if (notFound) {
     return (
@@ -189,6 +216,30 @@ export function PipelineView({ id }: { id: string }) {
             ? (data?.error ?? "Something went wrong while generating your video.")
             : "Do not close this page. Generation continues on the server."}
         </p>
+
+        {isError ? (
+          <div className="mt-4 border-t border-border pt-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleRetry}
+                disabled={retrying}
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {retrying ? <Spinner /> : <RetryIcon />}
+                {retrying ? "Resuming…" : "Retry from failed step"}
+              </button>
+              <p className="text-xs text-muted-foreground">
+                {doneCount > 0
+                  ? `Keeps your ${doneCount} completed ${doneCount === 1 ? "step" : "steps"} and resumes from where it stopped.`
+                  : "Resumes the run without starting over."}
+              </p>
+            </div>
+            {retryError ? (
+              <p className="mt-2 text-xs text-destructive">{retryError}</p>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       {/* Snapshots — what the AI is seeing as it navigates the app */}
@@ -405,6 +456,15 @@ function CheckCircleIcon() {
     <svg className="text-success" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="9" />
       <path d="m8 12 3 3 5-6" />
+    </svg>
+  )
+}
+
+function RetryIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v5h-5" />
     </svg>
   )
 }

@@ -7,8 +7,13 @@ jobs: dict = {}
 jobs_lock = asyncio.Lock()
 
 
-async def create_job(job_id: str) -> None:
-    """Create a new job entry with status 'queued'."""
+async def create_job(job_id: str, request=None) -> None:
+    """Create a new job entry with status 'queued'.
+
+    `request` is the original GenerateRequest, stored so a failed job can be
+    retried without the client re-submitting the form. `checkpoints` holds the
+    output of each completed step so a retry can resume instead of restarting.
+    """
     async with jobs_lock:
         jobs[job_id] = {
             "status": "queued",
@@ -19,6 +24,8 @@ async def create_job(job_id: str) -> None:
             "result": None,
             "tmp_files": [],
             "snapshots": [],
+            "request": request,
+            "checkpoints": {},
         }
 
 
@@ -69,6 +76,27 @@ async def get_job(job_id: str) -> Optional[dict]:
         if job_id in jobs:
             return dict(jobs[job_id])
         return None
+
+
+async def save_checkpoint(job_id: str, key: str, value) -> None:
+    """Store a completed step's output so a retry can reuse it."""
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].setdefault("checkpoints", {})[key] = value
+
+
+async def reset_for_retry(job_id: str) -> None:
+    """Prepare a failed job to run again from its last successful step.
+
+    Keeps steps_completed, checkpoints, snapshots and tmp_files intact so the
+    pipeline resumes rather than starting over. Only the failed step onward
+    will re-run.
+    """
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["status"] = "queued"
+            jobs[job_id]["error"] = None
+            jobs[job_id]["current_step"] = None
 
 
 async def add_tmp_file(job_id: str, path: str) -> None:

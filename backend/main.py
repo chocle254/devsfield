@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 
 from models import GenerateRequest, JobStatus, JobResult
-from jobs import create_job, get_job, get_snapshot
+from jobs import create_job, get_job, get_snapshot, reset_for_retry
 from pipeline.orchestrator import run_pipeline
 
 load_dotenv()
@@ -72,8 +72,40 @@ async def generate(request: GenerateRequest) -> dict:
         )
 
     job_id = str(uuid.uuid4())
-    await create_job(job_id)
+    # Store the request so a failed run can be retried (resumed) without the
+    # client re-submitting the form.
+    await create_job(job_id, request)
 
+    asyncio.create_task(run_pipeline(job_id, request))
+
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/retry/{job_id}")
+async def retry_job(job_id: str) -> dict:
+    """Resume a failed job from the step that broke.
+
+    Reuses the checkpointed output of every step that already completed, so
+    only the failed step onward re-runs. Requires the run to still be in
+    memory (same server process) with its saved request.
+    """
+    job = await get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "failed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a failed job can be retried",
+        )
+
+    request = job.get("request")
+    if request is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This run can no longer be retried. Please start a new one.",
+        )
+
+    await reset_for_retry(job_id)
     asyncio.create_task(run_pipeline(job_id, request))
 
     return {"job_id": job_id, "status": "queued"}
