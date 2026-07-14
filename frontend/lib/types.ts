@@ -106,6 +106,8 @@ export interface EditMessage {
 
 export interface RunResult {
   videoUrl: string
+  /** ordered per-segment clip URLs, played back-to-back in the watch view */
+  clipUrls?: string[]
   posterUrl: string
   durationSec: number
   title: string
