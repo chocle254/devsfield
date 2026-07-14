@@ -19,12 +19,32 @@ from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
 
 from models import GenerateRequest, JobStatus, JobResult
-from jobs import create_job, get_job, get_snapshot, reset_for_retry
+from jobs import create_job, get_job, get_snapshot, reset_for_retry, restore_job
+from pipeline import resume_store
 from pipeline.orchestrator import run_pipeline
 
 load_dotenv()
 
 app = FastAPI(title="Devfields API")
+
+
+async def ensure_job_loaded(job_id: str):
+    """Return a job, rehydrating it from B2 if it's not in memory.
+
+    After a backend redeploy the in-memory `jobs` dict is empty, so any run
+    that was mid-flight or failed would otherwise 404. If it was checkpointed
+    to durable storage we rebuild the in-memory entry from `state.json`
+    (metadata only — artifact files are pulled back separately, and only when
+    a retry actually needs them).
+    """
+    job = await get_job(job_id)
+    if job is not None:
+        return job
+    state = await resume_store.load_state(job_id)
+    if state is None:
+        return None
+    await restore_job(job_id, state)
+    return await get_job(job_id)
 
 app.add_middleware(
     CORSMiddleware,
@@ -86,10 +106,11 @@ async def retry_job(job_id: str) -> dict:
     """Resume a failed job from the step that broke.
 
     Reuses the checkpointed output of every step that already completed, so
-    only the failed step onward re-runs. Requires the run to still be in
-    memory (same server process) with its saved request.
+    only the failed step onward re-runs. Works even after a backend redeploy:
+    the run's state and intermediate artifacts are rehydrated from Backblaze
+    B2 when they're no longer in memory / on local disk.
     """
-    job = await get_job(job_id)
+    job = await ensure_job_loaded(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.get("status") != "failed":
@@ -105,6 +126,14 @@ async def retry_job(job_id: str) -> dict:
             detail="This run can no longer be retried. Please start a new one.",
         )
 
+    # Pull the checkpointed artifact files back onto local disk if they're not
+    # already there (they live only in B2 after a redeploy). Anything that
+    # can't be restored is transparently re-run from the earliest missing step.
+    try:
+        await resume_store.download_artifacts(job_id)
+    except Exception:
+        pass
+
     await reset_for_retry(job_id)
     asyncio.create_task(run_pipeline(job_id, request))
 
@@ -114,7 +143,7 @@ async def retry_job(job_id: str) -> dict:
 @app.get("/status/{job_id}")
 async def get_status(job_id: str) -> JobStatus:
     """Get the current status of a job."""
-    job = await get_job(job_id)
+    job = await ensure_job_loaded(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -195,7 +224,7 @@ async def sse_generator(job_id: str):
 @app.get("/stream/{job_id}")
 async def stream_job(job_id: str):
     """Stream job progress via Server-Sent Events."""
-    job = await get_job(job_id)
+    job = await ensure_job_loaded(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
