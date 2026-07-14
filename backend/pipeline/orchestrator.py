@@ -12,9 +12,24 @@ from jobs import (
     get_tmp_files,
     get_job,
     save_checkpoint,
+    set_resume_state,
 )
 from . import github_reader, demo_planner, app_browser, script_writer, image_generator
-from . import voice_generator, video_assembler, storage
+from . import voice_generator, video_assembler, storage, resume_store
+
+
+async def _advance(job_id: str, step: str) -> None:
+    """Mark a step complete and mirror the new checkpoint to durable storage.
+
+    Persistence is best-effort: a B2 hiccup must never fail a generation that
+    otherwise succeeded — it only means that particular checkpoint won't be
+    resumable after a redeploy.
+    """
+    await complete_step(job_id, step)
+    try:
+        await resume_store.persist(job_id)
+    except Exception:
+        pass
 
 
 async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
@@ -27,8 +42,20 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
     """
     try:
         job = await get_job(job_id) or {}
-        completed = set(job.get("steps_completed", []))
-        ckpt = dict(job.get("checkpoints", {}))
+
+        # Resume safety net: a completed step is only trustworthy if its
+        # checkpoint metadata AND the files it produced are actually present.
+        # After a redeploy that wiped local disk (even with artifacts pulled
+        # back from B2), anything that couldn't be restored is dropped here so
+        # we re-run cleanly from the earliest gap instead of crashing on a
+        # missing file. Resume as far as possible, else restart cleanly.
+        kept_steps, kept_ckpt = resume_store.validate_checkpoints(
+            job.get("steps_completed", []), job.get("checkpoints", {}))
+        if kept_steps != job.get("steps_completed", []):
+            await set_resume_state(job_id, kept_steps, kept_ckpt)
+
+        completed = set(kept_steps)
+        ckpt = dict(kept_ckpt)
 
         credentials = None
         if request.credentials is not None:
@@ -51,7 +78,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
                 context, request.video_length, has_credentials=credentials is not None)
             await save_checkpoint(job_id, "context", context)
             await save_checkpoint(job_id, "plan", plan)
-            await complete_step(job_id, "github_reader")
+            await _advance(job_id, "github_reader")
 
         # 2. Record the live app
         if "app_browser" in completed and "recording" in ckpt:
@@ -64,7 +91,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
                 video_length=request.video_length, job_id=job_id)
             await add_tmp_file(job_id, recording["video_path"])
             await save_checkpoint(job_id, "recording", recording)
-            await complete_step(job_id, "app_browser")
+            await _advance(job_id, "app_browser")
 
         # 3. Write the segmented narration script
         if "script_writer" in completed and "script_segments" in ckpt:
@@ -74,7 +101,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
             script_segments = await script_writer.write_segmented_script(
                 context, recording["segments"], request.tone)
             await save_checkpoint(job_id, "script_segments", script_segments)
-            await complete_step(job_id, "script_writer")
+            await _advance(job_id, "script_writer")
 
         # 4. Generate the title card
         if "image_generator" in completed and "title_card_path" in ckpt:
@@ -86,7 +113,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
             if title_card_path is not None:
                 await add_tmp_file(job_id, title_card_path)
             await save_checkpoint(job_id, "title_card_path", title_card_path)
-            await complete_step(job_id, "image_generator")
+            await _advance(job_id, "image_generator")
 
         # 5. Generate per-segment voiceover
         if "voice_generator" in completed and "voiced_segments" in ckpt:
@@ -98,7 +125,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
             for seg in voiced_segments:
                 await add_tmp_file(job_id, seg["audio_path"])
             await save_checkpoint(job_id, "voiced_segments", voiced_segments)
-            await complete_step(job_id, "voice_generator")
+            await _advance(job_id, "voice_generator")
 
         # 6. Composite the final video
         if "video_assembler" in completed and "assembly" in ckpt:
@@ -112,7 +139,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
                 await add_tmp_file(job_id, clip["clip_path"])
                 await add_tmp_file(job_id, clip["merged_path"])
             await save_checkpoint(job_id, "assembly", assembly)
-            await complete_step(job_id, "video_assembler")
+            await _advance(job_id, "video_assembler")
 
         # 7. Upload everything to Backblaze B2 (terminal step, no checkpoint)
         await set_step(job_id, "storage", "Uploading to Backblaze B2...")
@@ -124,6 +151,12 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
 
     except Exception as e:
         await fail_job(job_id, str(e))
+        # Mirror the failed state (status + error + latest checkpoints) to B2
+        # so the run can still be resumed after a backend redeploy.
+        try:
+            await resume_store.persist(job_id)
+        except Exception:
+            pass
 
     finally:
         # Only clean up temp files once the job has completed successfully. On
@@ -131,6 +164,12 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
         # resume from the step that broke instead of regenerating everything.
         job = await get_job(job_id)
         if job and job.get("status") == "complete":
+            # The video is finished — drop the resume scratch on B2 so we only
+            # ever retain intermediate artifacts for in-flight/failed runs.
+            try:
+                await resume_store.cleanup(job_id)
+            except Exception:
+                pass
             tmp_files = await get_tmp_files(job_id)
             for file_path in tmp_files:
                 try:

@@ -20,14 +20,30 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-async def upload_all(job_id: str, final_video_path: str,
-                      segment_clips: list[dict]) -> dict:
+def make_b2_backend() -> S3StorageBackend:
+    """Build a Backblaze B2 backend from the environment.
+
+    The region MUST be passed explicitly: buckets in regions like
+    ``us-east-005`` reject cross-region requests with a 403 instead of a
+    301 redirect, so genblaze's auto-detect can't recover — it never sees a
+    region header. We default to ``us-east-005`` (this project's bucket
+    region) and let ``$B2_REGION`` override it. This is the single place
+    both final uploads and resume checkpoints construct their backend, so
+    the region fix applies everywhere at once.
+    """
     b2_bucket = os.environ.get("B2_BUCKET")
-    b2_public_url = os.environ.get("B2_PUBLIC_URL", "")
     if not b2_bucket:
         raise ValueError("B2_BUCKET not set in environment")
+    b2_region = os.environ.get("B2_REGION", "us-east-005")
+    b2_public_url = os.environ.get("B2_PUBLIC_URL", "")
+    return S3StorageBackend.for_backblaze(
+        b2_bucket, region=b2_region, public_url_base=b2_public_url)
 
-    backend = S3StorageBackend.for_backblaze(b2_bucket, public_url_base=b2_public_url)
+
+async def upload_all(job_id: str, final_video_path: str,
+                      segment_clips: list[dict]) -> dict:
+    b2_public_url = os.environ.get("B2_PUBLIC_URL", "")
+    backend = make_b2_backend()
 
     # Upload final video
     with open(final_video_path, "rb") as f:

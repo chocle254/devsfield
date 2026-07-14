@@ -85,6 +85,41 @@ async def save_checkpoint(job_id: str, key: str, value) -> None:
             jobs[job_id].setdefault("checkpoints", {})[key] = value
 
 
+async def set_resume_state(job_id: str, steps_completed: list, checkpoints: dict) -> None:
+    """Overwrite the resumable state after validation/truncation.
+
+    Used when some checkpoint artifacts are missing (e.g. after a redeploy
+    wiped local disk): the caller drops the steps it can no longer trust so
+    the pipeline re-runs cleanly from the earliest gap.
+    """
+    async with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["steps_completed"] = list(steps_completed)
+            jobs[job_id]["checkpoints"] = dict(checkpoints)
+
+
+async def restore_job(job_id: str, state: dict) -> None:
+    """Recreate an in-memory job from durable state loaded out of B2.
+
+    This is how a run survives a backend redeploy: the process lost its
+    `jobs` dict, so we rebuild the entry from the state that was checkpointed
+    to Backblaze. `request` is expected to already be a GenerateRequest.
+    """
+    async with jobs_lock:
+        jobs[job_id] = {
+            "status": state.get("status", "failed"),
+            "current_step": None,
+            "steps_completed": list(state.get("steps_completed", [])),
+            "message": state.get("message"),
+            "error": state.get("error"),
+            "result": None,
+            "tmp_files": [],
+            "snapshots": [],
+            "request": state.get("request"),
+            "checkpoints": dict(state.get("checkpoints", {})),
+        }
+
+
 async def reset_for_retry(job_id: str) -> None:
     """Prepare a failed job to run again from its last successful step.
 
