@@ -1,7 +1,8 @@
+
 "use client"
 
 import Link from "next/link"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { RunResult } from "@/lib/types"
 
 interface ResultPayload {
@@ -81,10 +82,7 @@ export function WatchView({ id }: { id: string }) {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="overflow-hidden rounded-xl border border-border bg-black">
-        <video key={r.videoUrl} controls autoPlay preload="metadata" poster={r.posterUrl} className="aspect-video w-full bg-black">
-          <source src={r.videoUrl} type="video/mp4" />
-          Your browser does not support the video tag.
-        </video>
+        <SequentialPlayer result={r} />
       </div>
 
       <div className="mt-4">
@@ -116,6 +114,67 @@ export function WatchView({ id }: { id: string }) {
         </Link>
       </div>
     </div>
+  )
+}
+
+function SequentialPlayer({ result }: { result: RunResult }) {
+  const clips = (result.clipUrls ?? []).filter(Boolean)
+  const hasClips = clips.length > 0
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const [index, setIndex] = useState(0)
+
+  // Whenever we advance to a new clip, load it and keep playing so the
+  // segments run back-to-back with no black screen between them.
+  useEffect(() => {
+    if (!hasClips) return
+    const v = videoRef.current
+    if (!v) return
+    v.load()
+    const play = v.play()
+    if (play && typeof play.catch === "function") play.catch(() => {})
+  }, [index, hasClips])
+
+  // Single-file fallback: play the pre-rendered final video as-is.
+  if (!hasClips) {
+    return (
+      <video
+        key={result.videoUrl}
+        controls
+        autoPlay
+        preload="metadata"
+        poster={result.posterUrl}
+        className="aspect-video w-full bg-black"
+      >
+        <source src={result.videoUrl} type="video/mp4" />
+        Your browser does not support the video tag.
+      </video>
+    )
+  }
+
+  const isLast = index >= clips.length - 1
+
+  function handleEnded() {
+    if (!isLast) setIndex((i) => i + 1)
+  }
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        key={clips[index]}
+        controls
+        autoPlay
+        preload="auto"
+        poster={index === 0 ? result.posterUrl : undefined}
+        onEnded={handleEnded}
+        className="aspect-video w-full bg-black"
+      >
+        <source src={clips[index]} type="video/mp4" />
+        Your browser does not support the video tag.
+      </video>
+      {/* Warm the browser cache for the next clip to avoid a gap on switch. */}
+      {!isLast ? <link rel="prefetch" as="video" href={clips[index + 1]} /> : null}
+    </>
   )
 }
 
