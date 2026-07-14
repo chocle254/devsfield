@@ -127,6 +127,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     },
   ].filter(Boolean)
 
+  // Ordered per-segment clip URLs. The player streams these back-to-back so
+  // the viewer sees every segment (with its own voiceover) and no black
+  // screens, even if the pre-rendered final_video.mp4 was short/silent.
+  const clipUrls: string[] = rawSegments
+    .slice()
+    .sort((a, b) => {
+      const ai = typeof a.segment_id === "number" ? a.segment_id : 0
+      const bi = typeof b.segment_id === "number" ? b.segment_id : 0
+      return ai - bi
+    })
+    .map((s) => (typeof s.clip_url === "string" ? s.clip_url : ""))
+    .filter(Boolean)
+
   const result = {
     videoUrl: data.video_url ?? "",
     posterUrl: "/demo-poster.png",
