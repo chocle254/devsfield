@@ -45,6 +45,30 @@ TONE_VOICES: dict[str, str] = {
 }
 DEFAULT_VOICE = TONE_VOICES["pitch"]
 
+# Named voices selectable from the "Voice" dropdown in the UI. The key is the
+# lowercase value sent by the frontend; the value is the ElevenLabs voice_id
+# (found in ElevenLabs under each voice's menu -> "View" -> "Voice ID").
+#
+# >>> Paste the real ElevenLabs voice IDs below. <<<
+NAMED_VOICES: dict[str, str] = {
+    "lamin": "REPLACE_WITH_LAMIN_VOICE_ID",
+    "julius": "REPLACE_WITH_JULIUS_VOICE_ID",
+    "sinclair": "REPLACE_WITH_SINCLAIR_VOICE_ID",
+}
+
+
+def resolve_voice_id(voice: str | None, tone: str) -> str:
+    """Pick a voice_id: an explicit named voice wins, else fall back to tone."""
+    if voice:
+        key = voice.strip().lower()
+        if key in NAMED_VOICES:
+            return NAMED_VOICES[key]
+        if key in TONE_VOICES:
+            return TONE_VOICES[key]
+        # Allow passing a raw ElevenLabs voice_id straight through.
+        return voice.strip()
+    return TONE_VOICES.get(tone, DEFAULT_VOICE)
+
 
 def _prep_text(text: str) -> str:
     text = " ".join(text.split())
@@ -76,11 +100,12 @@ def _generate_one(job_id: str, segment_id: int, text: str, voice_id: str) -> str
 
 async def generate_segment_voices(script_segments: list[dict],
                                   job_id: str,
-                                  tone: str = "pitch") -> list[dict]:
+                                  tone: str = "pitch",
+                                  voice: str | None = None) -> list[dict]:
     if not os.environ.get("ELEVENLABS_API_KEY"):
         raise ValueError("ELEVENLABS_API_KEY not set")
 
-    voice_id = TONE_VOICES.get(tone, DEFAULT_VOICE)
+    voice_id = resolve_voice_id(voice, tone)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
     async def process(seg: dict) -> dict:
