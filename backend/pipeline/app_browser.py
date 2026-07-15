@@ -28,6 +28,9 @@ import httpx
 from playwright.async_api import async_playwright
 
 from jobs import add_snapshot, add_tmp_file
+import logging
+
+logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3-0324"
