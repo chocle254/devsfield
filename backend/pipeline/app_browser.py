@@ -463,10 +463,8 @@ async def record_app(app_url: str, repo_context: dict = None,
                         app_summary)
 
                     url_before_action = urldefrag(page.url)[0]
-                    await _perform_action(page, decision)
+                    action_succeeded = await _perform_action(page, decision)
 
-                    # Let the result of the action settle and be visible on
-                    # camera long enough for the viewer to read/absorb it.
                     await page.wait_for_timeout(4000)
                     url_after_action = urldefrag(page.url)[0]
                     if job_id and url_after_action != url_before_action:
@@ -478,6 +476,30 @@ async def record_app(app_url: str, repo_context: dict = None,
                         await _capture_snapshot(page, job_id, capture_state)
 
                     post_observation = await _observe(page)
+
+                    # Stuck detection: the action reported failure AND nothing
+                    # about the page changed (no navigation, no visible text
+                    # change). Recording a segment here would show the viewer
+                    # a static screen while narration claims progress — so we
+                    # drop this attempt instead of banking it as a segment,
+                    # and free the beat early rather than looping blind.
+                    page_unchanged = (
+                        url_after_action == url_before_action
+                        and post_observation.get("visible_text") == observation.get("visible_text")
+                    )
+                    if not action_succeeded and page_unchanged:
+                        actions_taken.append({
+                            "action": decision.get("action"),
+                            "selector": decision.get("selector"),
+                            "reason": "STUCK — no visible effect, skipping",
+                        })
+                        logger.warning(
+                            "Beat '%s' stuck on action %s (selector=%s) — "
+                            "no page change detected, ending beat early",
+                            beat.get("feature"), decision.get("action"),
+                            decision.get("selector"))
+                        break  # reclaim remaining beat_seconds for later beats
+
                     segment_end = elapsed()
                     segment_id += 1
                     segments.append({
@@ -488,6 +510,8 @@ async def record_app(app_url: str, repo_context: dict = None,
                         "talking_point": beat.get("talking_point", ""),
                         "action": decision.get("action", "wait"),
                         "reason": decision.get("reason", ""),
+                        # Narration should describe what's actually on screen
+                        # AFTER the action, not the pre-action guess.
                         "observation": post_observation,
                     })
                     actions_taken.append({
