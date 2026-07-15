@@ -9,26 +9,42 @@ Key behaviors:
 - Loading dead-time never appears in the final video: each segment's clock
   starts only AFTER the page has finished loading, so spinner time falls
   between segments and is cut during assembly.
-- Optional login: if the developer supplied demo credentials, the browser
-  detects the login form, fills it, and submits before demoing gated features.
-- Every segment records an "observation" — what was actually visible on
-  screen (title, headings, visible text) — so the narration can describe
-  exactly what the viewer is seeing, not what a script guessed.
+- Every action that's supposed to change the page (click, checkbox, type) is
+  verified, not assumed. A click that throws no exception but also doesn't
+  change anything (overlay, unbound JS, animation) is treated as a failure,
+  the beat is ended early instead of burning its time budget on a stuck
+  screen, and the failure is logged with enough detail to diagnose.
+- Narration data ("observation") is captured AFTER an action is confirmed to
+  have worked, never before — so the script never describes a page the
+  recording hasn't actually reached yet.
+- Goal-oriented account setup: if the developer supplied demo credentials,
+  log in with them. If no credentials were supplied and the app requires an
+  account, sign up as a brand-new user (temp inbox, consent checkboxes,
+  email verification, onboarding wizard) so gated features can still be
+  demoed instead of being skipped outright. If signup can't be confirmed
+  within its budget, the agent falls back to demoing public pages only —
+  it never guesses that a login succeeded.
+- We never attempt to drive a third-party OAuth popup (Google/etc.) — it's
+  closed and ignored if one appears.
 """
+import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
+import secrets
 import shutil
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from urllib.parse import urldefrag
 
 import httpx
 from playwright.async_api import async_playwright
 
 from jobs import add_snapshot, add_tmp_file
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +58,14 @@ ACTION_TIMEOUT_MS = 5000
 
 # Minimum leftover budget worth starting another beat with
 MIN_BEAT_SECONDS = 8
+
+# Goal-oriented signup: off-camera budget for the whole
+# form-fill -> submit -> (maybe) email-verify -> onboarding flow.
+SIGNUP_BUDGET_SECONDS = 90
+TEMP_MAIL_API = "https://api.mail.tm"
+INBOX_POLL_INTERVAL_S = 3
+INBOX_POLL_TIMEOUT_S = 45
+ONBOARDING_MAX_STEPS = 6
 
 
 async def _safe_goto(page, url: str) -> bool:
@@ -151,18 +175,57 @@ async def _observe(page) -> dict:
     return observation
 
 
+async def _close_unexpected_popups(page) -> None:
+    """Close any extra window a login/signup click may have opened (e.g. a
+    Google OAuth popup). We never drive third-party auth UIs — closing the
+    popup and falling back to the base page is more reliable than trying to
+    automate another company's login form, and safer to do without asking."""
+    try:
+        for p in list(page.context.pages):
+            if p is not page:
+                try:
+                    await p.close()
+                except Exception:
+                    pass
+                logger.info("Closed a secondary login window (likely OAuth) "
+                           "— continuing on the main page")
+    except Exception:
+        pass
+
+
+async def _looks_authenticated(page, url_before: str) -> bool:
+    """Heuristic check that a login/signup submission actually worked: the
+    URL moved away from the auth page, or the password field disappeared —
+    and the page isn't showing an email-verification prompt or an error."""
+    try:
+        still_has_password_field = await page.locator(
+            "input[type='password']").count() > 0
+        url_changed = urldefrag(page.url)[0] != url_before
+        body_text = (await page.locator("body").inner_text())[:1000].lower()
+        verify_pending = any(
+            k in body_text for k in ("verify your email", "confirm your email",
+                                      "check your inbox", "check your email"))
+        error_shown = any(
+            k in body_text for k in ("invalid password", "incorrect password",
+                                      "invalid credentials", "user not found"))
+        return ((url_changed or not still_has_password_field)
+                and not verify_pending and not error_shown)
+    except Exception:
+        return False
+
+
 async def _attempt_login(page, app_url: str, credentials: dict,
                          job_id: str, capture_state: dict) -> bool:
     """
     Find and complete a login form using developer-supplied credentials.
-    Returns True if a login was submitted.
+    Returns True only if the submission could be confirmed to have actually
+    logged in — not just "no exception was thrown".
     """
     username = credentials.get("username", "")
     password = credentials.get("password", "")
     if not username or not password:
         return False
 
-    # If there's no password field on the current page, try common login routes
     async def has_password_field() -> bool:
         try:
             return await page.locator("input[type='password']").count() > 0
@@ -181,17 +244,15 @@ async def _attempt_login(page, app_url: str, credentials: dict,
             return False
 
     try:
-        # Username / email field: first visible non-password text-like input
         user_input = page.locator(
             "input[type='email'], input[name*='email' i], "
             "input[name*='user' i], input[type='text']"
         ).first
         await user_input.fill(username, timeout=ACTION_TIMEOUT_MS)
-
         await page.locator("input[type='password']").first.fill(
             password, timeout=ACTION_TIMEOUT_MS)
 
-        # Submit: prefer an explicit submit button, fall back to Enter
+        url_before = urldefrag(page.url)[0]
         submit = page.locator(
             "button[type='submit'], input[type='submit'], "
             "button:has-text('Log in'), button:has-text('Login'), "
@@ -202,16 +263,313 @@ async def _attempt_login(page, app_url: str, credentials: dict,
         else:
             await page.keyboard.press("Enter")
 
-        # Wait for the app to react (redirect, dashboard load) — capped.
         try:
-            await page.wait_for_load_state("networkidle",
-                                           timeout=SETTLE_TIMEOUT_MS)
+            await page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
         except Exception:
             await page.wait_for_timeout(2000)
+
+        await _close_unexpected_popups(page)
         await _capture_snapshot(page, job_id, capture_state)
-        return True
+        return await _looks_authenticated(page, url_before)
     except Exception:
         return False
+
+
+async def _create_temp_inbox() -> Optional[dict]:
+    """Create a disposable inbox via mail.tm. Returns
+    {"address": str, "password": str, "token": str} or None on failure.
+
+    Used only when the developer supplied no login credentials but the app
+    requires an account — lets the agent sign up as a real new user instead
+    of skipping every gated feature. Some apps reject disposable-email
+    domains outright; that's a legitimate signup failure, not a bug here —
+    it just means signup falls back to public-pages-only.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            domains_res = await client.get(f"{TEMP_MAIL_API}/domains")
+            domains_res.raise_for_status()
+            domains = domains_res.json().get("hydra:member", [])
+            if not domains:
+                return None
+            domain = domains[0]["domain"]
+
+            address = f"demo{uuid.uuid4().hex[:10]}@{domain}"
+            password = secrets.token_urlsafe(12)
+
+            create_res = await client.post(
+                f"{TEMP_MAIL_API}/accounts",
+                json={"address": address, "password": password},
+            )
+            if create_res.status_code not in (200, 201):
+                return None
+
+            token_res = await client.post(
+                f"{TEMP_MAIL_API}/token",
+                json={"address": address, "password": password},
+            )
+            token_res.raise_for_status()
+            token = token_res.json().get("token")
+            if not token:
+                return None
+
+            return {"address": address, "password": password, "token": token}
+    except Exception:
+        logger.warning("Temp inbox creation failed — signup will be skipped")
+        return None
+
+
+async def _poll_temp_inbox_for_link(token: str,
+                                    timeout: float = INBOX_POLL_TIMEOUT_S) -> Optional[str]:
+    """Poll the temp inbox for the first message and pull out a verification
+    link. Returns the URL, or None if nothing arrives within `timeout`."""
+    deadline = time.monotonic() + timeout
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while time.monotonic() < deadline:
+            try:
+                res = await client.get(f"{TEMP_MAIL_API}/messages", headers=headers)
+                res.raise_for_status()
+                messages = res.json().get("hydra:member", [])
+                if messages:
+                    msg_id = messages[0]["id"]
+                    detail_res = await client.get(
+                        f"{TEMP_MAIL_API}/messages/{msg_id}", headers=headers)
+                    detail_res.raise_for_status()
+                    body = detail_res.json()
+
+                    text_parts = []
+                    if isinstance(body.get("text"), str):
+                        text_parts.append(body["text"])
+                    html_field = body.get("html")
+                    if isinstance(html_field, list):
+                        text_parts.extend(h for h in html_field if isinstance(h, str))
+                    elif isinstance(html_field, str):
+                        text_parts.append(html_field)
+                    text = " ".join(text_parts)
+
+                    urls = re.findall(r'https?://[^\s"\'<>]+', text)
+                    for u in urls:
+                        if any(k in u.lower() for k in ("verify", "confirm", "activate")):
+                            return u
+                    if urls:
+                        return urls[0]
+            except Exception:
+                pass
+            await asyncio.sleep(INBOX_POLL_INTERVAL_S)
+    return None
+
+
+async def _has_signup_form(page) -> bool:
+    """Heuristic: a signup form has a password field AND either a second
+    password field (confirm) or explicit signup wording nearby."""
+    try:
+        password_count = await page.locator("input[type='password']").count()
+        if password_count == 0:
+            return False
+        text = (await page.locator("body").inner_text())[:2000].lower()
+        return password_count >= 2 or any(
+            k in text for k in ("create account", "sign up", "register", "get started"))
+    except Exception:
+        return False
+
+
+async def _find_signup_entry_point(page, app_url: str, job_id: str,
+                                   capture_state: dict) -> bool:
+    """Get a signup form on screen: use it if already visible, otherwise
+    click a 'Sign up' link, otherwise try common signup routes."""
+    if await _has_signup_form(page):
+        return True
+
+    try:
+        signup_link = page.get_by_role(
+            "link", name=re.compile("sign up|register|create account|get started", re.I))
+        if await signup_link.count() > 0:
+            await signup_link.first.click(timeout=ACTION_TIMEOUT_MS)
+            await page.wait_for_timeout(1500)
+            if job_id:
+                await _capture_snapshot(page, job_id, capture_state)
+            if await _has_signup_form(page):
+                return True
+    except Exception:
+        pass
+
+    for path in ("/signup", "/sign-up", "/register", "/auth/signup", "/auth/register"):
+        if await _safe_goto(page, app_url.rstrip("/") + path):
+            if job_id:
+                await _capture_snapshot(page, job_id, capture_state)
+            if await _has_signup_form(page):
+                return True
+    return False
+
+
+async def _check_all_consent_checkboxes(page) -> int:
+    """Check every visible checkbox on the page (terms, age confirmation,
+    etc.) — required consent boxes block submission otherwise. Each check is
+    verified against the box's actual state, not assumed from a clean click.
+    Returns how many are confirmed checked."""
+    confirmed = 0
+    try:
+        boxes = page.locator("input[type='checkbox']")
+        count = await boxes.count()
+        for i in range(count):
+            box = boxes.nth(i)
+            try:
+                if not await box.is_visible():
+                    continue
+                if await box.is_checked():
+                    confirmed += 1
+                    continue
+                await box.check(timeout=ACTION_TIMEOUT_MS)
+                if await box.is_checked():
+                    confirmed += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return confirmed
+
+
+async def _attempt_signup(page, app_url: str, job_id: str,
+                          capture_state: dict) -> Optional[dict]:
+    """
+    Goal-oriented autonomous signup: create a temp inbox, fill and submit the
+    signup form, check every consent checkbox, verify by email if the app
+    demands it, and confirm the account actually landed logged-in before
+    handing control back to the beat loop.
+
+    Returns the credentials used on confirmed success, or None if signup
+    could not be completed/verified — in which case the caller falls back to
+    demoing public pages only, exactly as if no credentials had ever been
+    supplied. We never guess that signup worked.
+    """
+    deadline = time.monotonic() + SIGNUP_BUDGET_SECONDS
+
+    if not await _find_signup_entry_point(page, app_url, job_id, capture_state):
+        logger.info("No signup form found — continuing with public pages only")
+        return None
+
+    inbox = await _create_temp_inbox()
+    if inbox is None:
+        logger.warning("Could not create a temp inbox — skipping signup")
+        return None
+
+    account_password = secrets.token_urlsafe(10) + "Aa1!"  # meets typical complexity rules
+
+    try:
+        email_input = page.locator(
+            "input[type='email'], input[name*='email' i], "
+            "input[name*='user' i], input[type='text']"
+        ).first
+        await email_input.fill(inbox["address"], timeout=ACTION_TIMEOUT_MS)
+
+        password_inputs = page.locator("input[type='password']")
+        pw_count = await password_inputs.count()
+        if pw_count >= 1:
+            await password_inputs.nth(0).fill(account_password, timeout=ACTION_TIMEOUT_MS)
+        if pw_count >= 2:
+            await password_inputs.nth(1).fill(account_password, timeout=ACTION_TIMEOUT_MS)
+
+        await _check_all_consent_checkboxes(page)
+
+        url_before = urldefrag(page.url)[0]
+        submit = page.locator(
+            "button[type='submit'], input[type='submit'], "
+            "button:has-text('Sign up'), button:has-text('Sign Up'), "
+            "button:has-text('Create account'), button:has-text('Register'), "
+            "button:has-text('Get started')"
+        ).first
+        if await submit.count() > 0:
+            await submit.click(timeout=ACTION_TIMEOUT_MS)
+        else:
+            await page.keyboard.press("Enter")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
+        except Exception:
+            await page.wait_for_timeout(2000)
+
+        await _close_unexpected_popups(page)
+        if job_id:
+            await _capture_snapshot(page, job_id, capture_state)
+    except Exception as e:
+        logger.warning("Signup form fill/submit failed: %s", e)
+        return None
+
+    if await _looks_authenticated(page, url_before):
+        return {"username": inbox["address"], "password": account_password}
+
+    # Email verification required — poll the temp inbox and follow the link.
+    logger.info("Signup appears to require email verification — polling temp inbox")
+    remaining = max(10.0, deadline - time.monotonic())
+    verify_link = await _poll_temp_inbox_for_link(inbox["token"], timeout=remaining)
+    if not verify_link:
+        logger.warning("No verification email arrived within budget — "
+                       "continuing with public pages only")
+        return None
+
+    if not await _safe_goto(page, verify_link):
+        logger.warning("Verification link did not load — continuing with public pages only")
+        return None
+    if job_id:
+        await _capture_snapshot(page, job_id, capture_state)
+
+    # Some apps verify then redirect to a login page rather than auto-signing in.
+    if await page.locator("input[type='password']").count() > 0:
+        try:
+            await page.locator(
+                "input[type='email'], input[name*='email' i], "
+                "input[name*='user' i], input[type='text']"
+            ).first.fill(inbox["address"], timeout=ACTION_TIMEOUT_MS)
+            await page.locator("input[type='password']").first.fill(
+                account_password, timeout=ACTION_TIMEOUT_MS)
+
+            relogin_url_before = urldefrag(page.url)[0]
+            submit = page.locator(
+                "button[type='submit'], input[type='submit'], "
+                "button:has-text('Log in'), button:has-text('Sign in')"
+            ).first
+            if await submit.count() > 0:
+                await submit.click(timeout=ACTION_TIMEOUT_MS)
+            else:
+                await page.keyboard.press("Enter")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT_MS)
+            except Exception:
+                await page.wait_for_timeout(2000)
+            if job_id:
+                await _capture_snapshot(page, job_id, capture_state)
+            url_before = relogin_url_before
+        except Exception:
+            pass
+
+    if await _looks_authenticated(page, url_before):
+        return {"username": inbox["address"], "password": account_password}
+
+    logger.warning("Could not confirm signup succeeded — continuing with public pages only")
+    return None
+
+
+async def _complete_onboarding(page, job_id: str, capture_state: dict) -> None:
+    """Click through a post-signup onboarding wizard (Next/Continue/Skip/
+    Get Started/Finish) until it's gone or the step cap is hit. Kept off
+    camera — the viewer sees the finished app, not the wizard."""
+    for _ in range(ONBOARDING_MAX_STEPS):
+        try:
+            btn = page.get_by_role(
+                "button",
+                name=re.compile("next|continue|skip|finish|done|get started|let's go", re.I),
+            )
+            if await btn.count() == 0:
+                return
+            url_before = urldefrag(page.url)[0]
+            await btn.first.click(timeout=ACTION_TIMEOUT_MS)
+            await page.wait_for_timeout(1200)
+            if job_id and urldefrag(page.url)[0] != url_before:
+                await _capture_snapshot(page, job_id, capture_state)
+        except Exception:
+            return
 
 
 async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
@@ -308,9 +666,10 @@ async def _perform_action(page, decision: dict) -> bool:
                 if await candidate.count() > 0:
                     locator = candidate.first
             if locator is None:
-                locator = page.locator(selector).first
-                if await locator.count() == 0:
+                candidate = page.locator(selector)
+                if await candidate.count() == 0:
                     return False
+                locator = candidate.first
 
             input_type = None
             try:
@@ -421,12 +780,34 @@ async def record_app(app_url: str, repo_context: dict = None,
             if job_id:
                 await _capture_snapshot(page, job_id, capture_state)
 
-            # Optional login before demoing (kept OUT of segments — viewers
-            # don't need to watch credentials being typed).
-            if demo_plan.get("needs_login") and credentials:
-                await _attempt_login(
+            # Goal-oriented account setup. We check for a gate two ways: the
+            # planner's `needs_login` flag, OR the landing page itself already
+            # being an auth wall (some apps land directly on sign-in) — the
+            # planner's flag is a hint, not the only signal.
+            landing_has_password_field = False
+            try:
+                landing_has_password_field = await page.locator(
+                    "input[type='password']").count() > 0
+            except Exception:
+                pass
+            app_is_gated = demo_plan.get("needs_login") or landing_has_password_field
+
+            if app_is_gated and credentials:
+                logged_in = await _attempt_login(
                     page, app_url, credentials, job_id, capture_state)
-                # Return to home so beat 1 starts where the plan expects.
+                if not logged_in:
+                    logger.warning("Login with supplied credentials failed — "
+                                   "continuing with public pages only")
+                if await _safe_goto(page, app_url) and job_id:
+                    await _capture_snapshot(page, job_id, capture_state)
+            elif app_is_gated and not credentials:
+                signup_creds = await _attempt_signup(
+                    page, app_url, job_id, capture_state)
+                if signup_creds:
+                    await _complete_onboarding(page, job_id, capture_state)
+                else:
+                    logger.info("Signup could not be completed/verified — "
+                               "continuing with public pages only")
                 if await _safe_goto(page, app_url) and job_id:
                     await _capture_snapshot(page, job_id, capture_state)
 
@@ -468,6 +849,8 @@ async def record_app(app_url: str, repo_context: dict = None,
                     url_before_action = urldefrag(page.url)[0]
                     action_succeeded = await _perform_action(page, decision)
 
+                    # Let the result of the action settle and be visible on
+                    # camera long enough for the viewer to read/absorb it.
                     await page.wait_for_timeout(4000)
                     url_after_action = urldefrag(page.url)[0]
                     if job_id and url_after_action != url_before_action:
