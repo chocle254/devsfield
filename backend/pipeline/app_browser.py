@@ -287,40 +287,65 @@ Return ONLY valid JSON:
         return default
 
 
-async def _perform_action(page, decision: dict) -> None:
-    """Execute a micro-action, tolerating failures silently."""
+async def _perform_action(page, decision: dict) -> bool:
+    """Execute a micro-action. Returns True only if its effect on the page
+    could be confirmed — a click that didn't error but also didn't change
+    anything (checkbox state, DOM) counts as a failure, not a success."""
     action = decision.get("action", "wait")
     selector = decision.get("selector")
     value = decision.get("value")
 
     try:
         if action == "click" and selector:
+            locator = None
             if "name='" in selector:
                 role = selector.split("[")[0]
                 name = selector.split("name='")[1].rstrip("']")
-                locator = page.get_by_role(role, name=name)
-                if await locator.count() > 0:
-                    await locator.first.click(timeout=ACTION_TIMEOUT_MS)
-                    return
-            await page.click(selector, timeout=ACTION_TIMEOUT_MS)
+                candidate = page.get_by_role(role, name=name)
+                if await candidate.count() > 0:
+                    locator = candidate.first
+            if locator is None:
+                locator = page.locator(selector).first
+                if await locator.count() == 0:
+                    return False
+
+            input_type = None
+            try:
+                input_type = await locator.get_attribute("type")
+            except Exception:
+                pass
+
+            if input_type in ("checkbox", "radio"):
+                # Checkboxes need their own success check: a click can land
+                # without ever toggling the underlying `checked` property.
+                before = await locator.is_checked()
+                await locator.check(timeout=ACTION_TIMEOUT_MS)
+                after = await locator.is_checked()
+                return after and after != before
+
+            await locator.click(timeout=ACTION_TIMEOUT_MS)
+            return True
 
         elif action == "type" and value:
             if selector:
                 try:
                     await page.fill(selector, value, timeout=ACTION_TIMEOUT_MS)
-                    return
+                    return True
                 except Exception:
                     pass
             locator = page.get_by_role("textbox")
             if await locator.count() > 0:
                 await locator.first.fill(value, timeout=ACTION_TIMEOUT_MS)
+                return True
+            return False
 
         elif action == "scroll":
             await page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
+            return True
 
-        # "wait" falls through to the shared settle below
+        return False  # "wait" — no state change expected
     except Exception:
-        pass
+        return False
 
 
 async def record_app(app_url: str, repo_context: dict = None,
