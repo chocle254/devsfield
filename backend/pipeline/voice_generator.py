@@ -1,5 +1,13 @@
 """
-Generates one voiceover clip per script segment, using genblaze-elevenlabs.
+Generates one voiceover clip per script segment using genblaze-gmicloud
+(GMICloudAudioProvider). This uses the SAME GMI_CLOUD_API_KEY the rest of the
+pipeline already relies on — no separate ElevenLabs account is required, which
+also avoids ElevenLabs' free-tier block on cloud/data-center IPs.
+
+Voice is NON-FATAL: if TTS fails for a segment (or every candidate model is
+unavailable on the account), that segment comes back with ``audio_path=None``
+and the pipeline keeps going, producing a silent-but-complete segment instead
+of failing the whole job.
 """
 import asyncio
 import os
@@ -9,9 +17,13 @@ from urllib.parse import urlparse
 
 import httpx
 from genblaze_core import Pipeline, Modality
-from genblaze_elevenlabs import ElevenLabsTTSProvider
+from genblaze_gmicloud import GMICloudAudioProvider
 
 MAX_CONCURRENT = 1
+
+# Per-segment generation timeout. GMI audio runs through a request queue, so it
+# needs a more generous budget than a direct HTTP TTS call.
+GEN_TIMEOUT = 120
 
 
 async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.0) -> None:
@@ -37,36 +49,35 @@ async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.
     if os.path.abspath(src) != os.path.abspath(dest_path):
         shutil.copyfile(src, dest_path)
 
-TONE_VOICES: dict[str, str] = {
-    "pitch": "pNInz6obpgDQGcFmaJgB",       # Adam
-    "pitch_demo": "JBFqnCBsd6RMkjVDRZzb",  # George
-    "demo": "EXAVITQu4vr4xnSDxMaL",        # Sarah
-    "technical": "21m00Tcm4TlvDq8ikWAM",   # Rachel
-}
-DEFAULT_VOICE = TONE_VOICES["pitch"]
 
-# Named voices selectable from the "Voice" dropdown in the UI. The key is the
-# lowercase value sent by the frontend; the value is the ElevenLabs voice_id
-# (found in ElevenLabs under each voice's menu -> "View" -> "Voice ID").
+# Candidate (model, {gender: voice_id}) combos, ordered by preference. We try
+# them in order on the first segment and lock onto the first one that actually
+# works on this account, then reuse it for the rest of the segments. All voice
+# ids come from genblaze-gmicloud's curated catalog (models/voices.py).
 #
-# NOTE: The community Voice Library IDs (lamin / julius / sinclair) were removed
-# because they are not usable by the API until added to "My Voices" in the
-# ElevenLabs account. Re-add them here with account-owned voice IDs once that
-# is done. Until then, resolve_voice_id() falls back to the TONE_VOICES above.
-NAMED_VOICES: dict[str, str] = {}
+# ElevenLabs-via-GMI is last on purpose: it routes through GMI's ElevenLabs
+# proxy, which can hit the same upstream issues as the direct ElevenLabs API.
+_CANDIDATES: list[tuple[str, dict[str, str]]] = [
+    ("minimax-tts-speech-2.6-turbo", {"female": "presenter_female",
+                                      "male": "presenter_female"}),
+    ("inworld-tts-1.5-mini", {"female": "ashley", "male": "ronald"}),
+    ("elevenlabs-tts-v3", {"female": "EXAVITQu4vr4xnSDxMaL",   # Sarah
+                           "male": "pNInz6obpgDQGcFmaJgB"}),    # Adam
+]
+
+# Map the UI "tone" (and a few explicit voice hints) to a gender preference so
+# we pick a sensible voice from whichever candidate model ends up working.
+_MALE_TONES = {"pitch", "pitch_demo"}
 
 
-def resolve_voice_id(voice: str | None, tone: str) -> str:
-    """Pick a voice_id: an explicit named voice wins, else fall back to tone."""
+def _gender_for(tone: str, voice: str | None) -> str:
     if voice:
-        key = voice.strip().lower()
-        if key in NAMED_VOICES:
-            return NAMED_VOICES[key]
-        if key in TONE_VOICES:
-            return TONE_VOICES[key]
-        # Allow passing a raw ElevenLabs voice_id straight through.
-        return voice.strip()
-    return TONE_VOICES.get(tone, DEFAULT_VOICE)
+        v = voice.strip().lower()
+        if v in ("male", "man", "adam", "george", "antoni", "ronald"):
+            return "male"
+        if v in ("female", "woman", "sarah", "rachel", "ashley"):
+            return "female"
+    return "male" if (tone or "").lower() in _MALE_TONES else "female"
 
 
 def _prep_text(text: str) -> str:
@@ -78,30 +89,24 @@ def _prep_text(text: str) -> str:
     return text
 
 
-def _generate_one(job_id: str, segment_id: int, text: str, voice_id: str) -> str:
+def _generate_one(job_id: str, segment_id: int, text: str,
+                  model: str, voice_id: str, gmi_api_key: str) -> str:
+    """Generate a single clip with one GMI audio model. Raises on failure."""
     run, _manifest = (
         Pipeline(f"devfields-voice-{job_id}-seg{segment_id}")
         .step(
-            ElevenLabsTTSProvider(output_dir="/tmp"),
-            model="eleven_multilingual_v2",
+            GMICloudAudioProvider(api_key=gmi_api_key),
+            model=model,
             prompt=text,
             modality=Modality.AUDIO,
             voice_id=voice_id,
         )
-        .run(timeout=90)
+        .run(timeout=GEN_TIMEOUT)
     )
     step = run.steps[0]
     if step.status != "succeeded" or not step.assets:
-        # Print the full, untruncated provider error so the real ElevenLabs
-        # response body (e.g. voice_not_found / model incompatibility) is
-        # visible in the backend logs rather than being cut off.
-        print(
-            f"[voice] segment {segment_id} failed with voice_id={voice_id!r} "
-            f"model=eleven_multilingual_v2 error={step.error!r}",
-            flush=True,
-        )
         raise RuntimeError(
-            f"Voice generation failed for segment {segment_id}: {step.error}")
+            f"model={model} voice_id={voice_id} error={step.error!r}")
     return step.assets[0].url
 
 
@@ -109,24 +114,57 @@ async def generate_segment_voices(script_segments: list[dict],
                                   job_id: str,
                                   tone: str = "pitch",
                                   voice: str | None = None) -> list[dict]:
-    if not os.environ.get("ELEVENLABS_API_KEY"):
-        raise ValueError("ELEVENLABS_API_KEY not set")
+    gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
+    if not gmi_api_key:
+        raise ValueError("GMI_CLOUD_API_KEY not set")
 
-    voice_id = resolve_voice_id(voice, tone)
+    gender = _gender_for(tone, voice)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+    # Once one (model, voice) combo succeeds we lock it in so we don't re-probe
+    # dead models for every segment. Guarded by the semaphore (concurrency 1).
+    working: dict[str, tuple[str, str]] = {}
 
     async def process(seg: dict) -> dict:
         segment_id = seg["segment_id"]
         text = _prep_text(seg.get("text", ""))
+        audio_path: str | None = None
 
         async with semaphore:
-            asset_url = await asyncio.to_thread(
-                _generate_one, job_id, segment_id, text, voice_id)
+            if working:
+                attempts = [working["combo"]]
+            else:
+                attempts = [(m, voices[gender]) for m, voices in _CANDIDATES]
 
-            audio_path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
-            await materialize_asset(asset_url, audio_path, timeout=60.0)
+            for model, voice_id in attempts:
+                try:
+                    asset_url = await asyncio.to_thread(
+                        _generate_one, job_id, segment_id, text,
+                        model, voice_id, gmi_api_key)
+                    path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
+                    await materialize_asset(asset_url, path, timeout=60.0)
+                    audio_path = path
+                    working["combo"] = (model, voice_id)
+                    break
+                except Exception as exc:  # noqa: BLE001 — non-fatal by design
+                    print(
+                        f"[voice] segment {segment_id} attempt failed "
+                        f"({model}): {exc}",
+                        flush=True,
+                    )
+                    continue
 
+        if audio_path is None:
+            print(
+                f"[voice] segment {segment_id}: no TTS model succeeded — "
+                f"segment will be silent",
+                flush=True,
+            )
         return {**seg, "text": text, "audio_path": audio_path}
 
-    results = await asyncio.gather(*(process(seg) for seg in script_segments))
-    return list(results)
+    # Sequential (semaphore=1) so the first success can lock the working combo
+    # before the remaining segments run.
+    results = []
+    for seg in script_segments:
+        results.append(await process(seg))
+    return results

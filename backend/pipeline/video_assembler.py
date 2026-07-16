@@ -70,6 +70,31 @@ async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> 
     return output_path
 
 
+async def _merge_silent_segment(video_path: str, output_path: str) -> str:
+    """Normalize a clip and attach a full-length silent stereo track.
+
+    Used when a segment has no voiceover (TTS was non-fatal and produced no
+    audio). Every concat input must carry a stereo AAC track or the concat
+    demuxer drops audio for the whole video, so we synthesize silence that
+    matches the clip's own duration.
+    """
+    dur = await get_duration(video_path)
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-f", "lavfi", "-t", str(dur),
+        "-i", f"anullsrc=channel_layout=stereo:sample_rate={OUT_SR}",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-vf", _SCALE_PAD,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", str(OUT_SR), "-ac", "2",
+        "-shortest",
+        output_path, "-y",
+    ]
+    await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Silent segment merge")
+    return output_path
+
+
 async def _render_title_card(title_card_path: str, output_path: str,
                              duration: float = 3.0) -> str:
     """Render the title card as a normalized clip WITH a silent audio track.
@@ -197,7 +222,8 @@ async def assemble(
         seg_id = seg["segment_id"]
         start = seg.get("start_time")
         end = seg.get("end_time")
-        audio_path = seg["audio_path"]
+        audio_path = seg.get("audio_path")
+        has_audio = bool(audio_path) and os.path.exists(audio_path)
 
         raw_clip_path = f"/tmp/rawclip_{job_id}_seg{seg_id}.mp4"
 
@@ -207,12 +233,24 @@ async def assemble(
             # No timing info — use the full video as a fallback clip
             raw_clip_path = full_video_path
 
-        audio_duration = await get_duration(audio_path)
         padded_clip_path = f"/tmp/paddedclip_{job_id}_seg{seg_id}.mp4"
-        await fit_video_to_duration(raw_clip_path, audio_duration, padded_clip_path)
-
         merged_path = f"/tmp/mergedseg_{job_id}_seg{seg_id}.mp4"
-        await _merge_segment(padded_clip_path, audio_path, merged_path)
+
+        if has_audio:
+            # Voiceover drives the segment length so audio and video stay synced.
+            target_duration = await get_duration(audio_path)
+            await fit_video_to_duration(raw_clip_path, target_duration, padded_clip_path)
+            await _merge_segment(padded_clip_path, audio_path, merged_path)
+        else:
+            # No voiceover for this segment (TTS is non-fatal). Keep the segment
+            # at its recorded length (or the clip's own length) and attach a
+            # silent track so the concat step still produces continuous audio.
+            if start is not None and end is not None:
+                target_duration = max(0.5, float(end) - float(start))
+            else:
+                target_duration = await get_duration(raw_clip_path)
+            await fit_video_to_duration(raw_clip_path, target_duration, padded_clip_path)
+            await _merge_silent_segment(padded_clip_path, merged_path)
 
         segment_clip_paths.append({
             "segment_id": seg_id,
