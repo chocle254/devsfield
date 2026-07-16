@@ -49,12 +49,11 @@ DEFAULT_VOICE = TONE_VOICES["pitch"]
 # lowercase value sent by the frontend; the value is the ElevenLabs voice_id
 # (found in ElevenLabs under each voice's menu -> "View" -> "Voice ID").
 #
-# >>> Paste the real ElevenLabs voice IDs below. <<<
-NAMED_VOICES: dict[str, str] = {
-    "lamin": "hILdTfuUq4LRBMrxHERr",
-    "julius": "VlUmeC1Uzj3NnwiVR9K9",
-    "sinclair": "fx5le4FFKvx12m8z2cAr",
-}
+# NOTE: The community Voice Library IDs (lamin / julius / sinclair) were removed
+# because they are not usable by the API until added to "My Voices" in the
+# ElevenLabs account. Re-add them here with account-owned voice IDs once that
+# is done. Until then, resolve_voice_id() falls back to the TONE_VOICES above.
+NAMED_VOICES: dict[str, str] = {}
 
 
 def resolve_voice_id(voice: str | None, tone: str) -> str:
@@ -93,6 +92,14 @@ def _generate_one(job_id: str, segment_id: int, text: str, voice_id: str) -> str
     )
     step = run.steps[0]
     if step.status != "succeeded" or not step.assets:
+        # Print the full, untruncated provider error so the real ElevenLabs
+        # response body (e.g. voice_not_found / model incompatibility) is
+        # visible in the backend logs rather than being cut off.
+        print(
+            f"[voice] segment {segment_id} failed with voice_id={voice_id!r} "
+            f"model=eleven_multilingual_v2 error={step.error!r}",
+            flush=True,
+        )
         raise RuntimeError(
             f"Voice generation failed for segment {segment_id}: {step.error}")
     return step.assets[0].url
