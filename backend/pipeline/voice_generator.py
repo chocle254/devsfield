@@ -93,6 +93,14 @@ def _generate_one(job_id: str, segment_id: int, text: str, voice_id: str) -> str
     )
     step = run.steps[0]
     if step.status != "succeeded" or not step.assets:
+        # Print the full, untruncated provider error so the real ElevenLabs
+        # response body (e.g. voice_not_found / model incompatibility) is
+        # visible in the backend logs rather than being cut off.
+        print(
+            f"[voice] segment {segment_id} failed with voice_id={voice_id!r} "
+            f"model=eleven_multilingual_v2 error={step.error!r}",
+            flush=True,
+        )
         raise RuntimeError(
             f"Voice generation failed for segment {segment_id}: {step.error}")
     return step.assets[0].url
