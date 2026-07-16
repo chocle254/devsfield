@@ -49,12 +49,11 @@ DEFAULT_VOICE = TONE_VOICES["pitch"]
 # lowercase value sent by the frontend; the value is the ElevenLabs voice_id
 # (found in ElevenLabs under each voice's menu -> "View" -> "Voice ID").
 #
-# >>> Paste the real ElevenLabs voice IDs below. <<<
-NAMED_VOICES: dict[str, str] = {
-    "lamin": "hILdTfuUq4LRBMrxHERr",
-    "julius": "VlUmeC1Uzj3NnwiVR9K9",
-    "sinclair": "fx5le4FFKvx12m8z2cAr",
-}
+# NOTE: The community Voice Library IDs (lamin / julius / sinclair) were removed
+# because they are not usable by the API until added to "My Voices" in the
+# ElevenLabs account. Re-add them here with account-owned voice IDs once that
+# is done. Until then, resolve_voice_id() falls back to the TONE_VOICES above.
+NAMED_VOICES: dict[str, str] = {}
 
 
 def resolve_voice_id(voice: str | None, tone: str) -> str:
