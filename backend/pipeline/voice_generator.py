@@ -84,7 +84,7 @@ def _generate_one(job_id: str, segment_id: int, text: str, voice_id: str) -> str
         Pipeline(f"devfields-voice-{job_id}-seg{segment_id}")
         .step(
             ElevenLabsTTSProvider(output_dir="/tmp"),
-            model="eleven_v3",
+            model="eleven_multilingual_v2",
             prompt=text,
             modality=Modality.AUDIO,
             voice_id=voice_id,
