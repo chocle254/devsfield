@@ -11,17 +11,37 @@ Why the narration sounds human and matches the screen:
 3. A strict spoken-language style guide bans the tells of AI writing
    ("seamlessly", "leverage", "robust"...) and forces contractions, short
    sentences, and a conversational through-line from segment to segment.
+
+GMI Cloud retry policy — why it's here:
+GMI Cloud's chat-completions endpoint has been observed returning transient
+upstream errors that aren't the caller's fault: 429s ("no available
+endpoints") and 400s shaped like an internal routing failure (a
+Volcengine-style "ResponseMeta"/"Missing Action parameter" body wrapped as
+{"type": "backend_error"}) rather than a real client-side bad request. Both
+are retried with exponential backoff; a genuine 4xx caused by our own
+payload (401 auth, 404, a real validation error without the backend_error
+wrapper) is NOT retried, since retrying those would just waste the job's
+time budget on a failure that will never succeed.
 """
+import asyncio
 import json
+import logging
 import os
+import random
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 SCRIPT_MODEL = "deepseek-ai/DeepSeek-V3-0324"
 
 # Comfortable demo narration pace. 145 wpm ≈ 2.4 words/second.
 WORDS_PER_SECOND = 2.4
+
+# Retry policy for transient GMI Cloud failures.
+GMI_MAX_RETRIES = 3
+GMI_BASE_DELAY_S = 2.0
 
 BANNED_PHRASES = [
     "seamlessly", "seamless", "leverage", "leveraging", "robust",
@@ -50,6 +70,83 @@ def _fallback(segments: list[dict], repo_name: str) -> list[dict]:
          "screen_note": seg.get("feature", seg.get("action", ""))}
         for seg in segments
     ]
+
+
+def _is_transient_gmi_error(status_code: int, body_text: str) -> bool:
+    """True if this response is worth retrying rather than failing the job.
+
+    Always transient: 429 (rate limit / no available endpoints) and 5xx
+    (GMI Cloud's own infra having a bad moment).
+
+    Conditionally transient: a 400 whose body identifies itself as
+    {"error": {"type": "backend_error", ...}} — this is GMI Cloud's own
+    backend failing to route the request internally (e.g. the
+    "Missing Action parameter" / ResponseMeta shape), not a rejection of
+    what we sent. A 400 WITHOUT that wrapper is treated as a real client
+    error and is not retried, since our payload won't change on retry.
+    """
+    if status_code == 429 or status_code >= 500:
+        return True
+    if status_code == 400:
+        try:
+            body = json.loads(body_text)
+            error_type = (body.get("error") or {}).get("type")
+            return error_type == "backend_error"
+        except (ValueError, AttributeError, TypeError):
+            return False
+    return False
+
+
+async def _call_gmi_chat(payload: dict, gmi_api_key: str) -> httpx.Response:
+    """POST to GMI Cloud's chat completions endpoint, retrying transient
+    upstream failures with exponential backoff + jitter. Returns the final
+    response (success or the last failed attempt) — callers still check
+    status_code themselves for the terminal outcome."""
+    last_response: httpx.Response | None = None
+    last_exc: Exception | None = None
+
+    for attempt in range(GMI_MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                response = await client.post(
+                    GMI_CHAT_URL,
+                    headers={"Authorization": f"Bearer {gmi_api_key}",
+                             "Content-Type": "application/json"},
+                    json=payload,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            last_exc = exc
+            if attempt == GMI_MAX_RETRIES:
+                raise RuntimeError(
+                    f"GMI Cloud unreachable after {GMI_MAX_RETRIES + 1} "
+                    f"attempts: {exc}") from exc
+            delay = GMI_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                "GMI Cloud network error (attempt %d/%d): %s — retrying in %.1fs",
+                attempt + 1, GMI_MAX_RETRIES + 1, exc, delay)
+            await asyncio.sleep(delay)
+            continue
+
+        if response.status_code == 200:
+            return response
+
+        last_response = response
+        if not _is_transient_gmi_error(response.status_code, response.text):
+            return response  # permanent failure — let the caller raise immediately
+
+        if attempt == GMI_MAX_RETRIES:
+            break
+
+        delay = GMI_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, 1)
+        logger.warning(
+            "GMI Cloud transient error %d (attempt %d/%d): %s — retrying in %.1fs",
+            response.status_code, attempt + 1, GMI_MAX_RETRIES + 1,
+            response.text[:300], delay)
+        await asyncio.sleep(delay)
+
+    if last_response is not None:
+        return last_response
+    raise RuntimeError(f"GMI Cloud call failed with no response: {last_exc}")
 
 
 async def write_segmented_script(context: dict, segments: list[dict],
@@ -130,24 +227,20 @@ No markdown. No explanation."""
     if not gmi_api_key:
         raise RuntimeError("GMI_CLOUD_API_KEY not set")
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        response = await client.post(
-            GMI_CHAT_URL,
-            headers={"Authorization": f"Bearer {gmi_api_key}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": SCRIPT_MODEL,
-                "messages": [
-                    {"role": "system", "content":
-                     "You write voice-over scripts that sound like a real "
-                     "person talking, never like AI marketing copy. "
-                     "Respond ONLY with valid JSON."},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.8,
-                "max_tokens": 2500,
-            },
-        )
+    payload = {
+        "model": SCRIPT_MODEL,
+        "messages": [
+            {"role": "system", "content":
+             "You write voice-over scripts that sound like a real "
+             "person talking, never like AI marketing copy. "
+             "Respond ONLY with valid JSON."},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.8,
+        "max_tokens": 2500,
+    }
+
+    response = await _call_gmi_chat(payload, gmi_api_key)
 
     if response.status_code != 200:
         raise RuntimeError(f"GMI Cloud error: {response.status_code} {response.text}")
