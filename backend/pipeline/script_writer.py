@@ -34,7 +34,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
-SCRIPT_MODEL = "deepseek-ai/DeepSeek-V3-0324"
+SCRIPT_MODEL = "deepseek-ai/DeepSeek-V3.2"
 
 # Comfortable demo narration pace. 145 wpm ≈ 2.4 words/second.
 WORDS_PER_SECOND = 2.4

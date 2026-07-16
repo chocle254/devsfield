@@ -14,7 +14,7 @@ import os
 import httpx
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
-PLANNER_MODEL = "deepseek-ai/DeepSeek-V3-0324"
+PLANNER_MODEL = "deepseek-ai/DeepSeek-V3.2"
 
 # Seconds reserved outside of screen recording (title card + concat buffer)
 RESERVED_SECONDS = 6

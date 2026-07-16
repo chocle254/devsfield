@@ -49,7 +49,7 @@ from jobs import add_snapshot, add_tmp_file
 logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
-NAV_MODEL = "deepseek-ai/DeepSeek-V3-0324"
+NAV_MODEL = "deepseek-ai/DeepSeek-V3.2"
 
 # How long we're willing to wait for a page before moving on (slow networks)
 GOTO_TIMEOUT_MS = 25000
