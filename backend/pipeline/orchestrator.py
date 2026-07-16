@@ -124,7 +124,9 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
                 script_segments, job_id, tone=request.tone,
                 voice=getattr(request, "voice", None))
             for seg in voiced_segments:
-                await add_tmp_file(job_id, seg["audio_path"])
+                # Voice is non-fatal: a segment may have no audio_path.
+                if seg.get("audio_path"):
+                    await add_tmp_file(job_id, seg["audio_path"])
             await save_checkpoint(job_id, "voiced_segments", voiced_segments)
             await _advance(job_id, "voice_generator")
 
