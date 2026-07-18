@@ -55,6 +55,22 @@ NAV_MODEL = "deepseek-ai/DeepSeek-V3.2"
 GOTO_TIMEOUT_MS = 25000
 SETTLE_TIMEOUT_MS = 6000
 ACTION_TIMEOUT_MS = 5000
+INTERACTION_SETTLE_MS = 900
+MAX_LIVE_CONTROLS = 36
+
+# The model is allowed to demonstrate product workflows, not mutate account,
+# billing, publishing, or other high-impact state.  Authentication has its own
+# explicit, credential-gated path below and is never driven through this list.
+UNSAFE_CONTROL_TERMS = {
+    "delete", "remove", "destroy", "logout", "log out", "sign out",
+    "unsubscribe", "billing", "checkout", "purchase", "pay now",
+    "transfer", "withdraw", "deploy", "publish", "invite", "share",
+    "password", "passcode", "secret", "token", "api key", "api-key",
+    "credit card", "card number", "cvv", "email", "username", "user name",
+    "phone", "settings", "profile",
+}
+SAFE_ACTIONS = {"click", "type", "select", "toggle", "press", "scroll"}
+ALLOWED_KEYS = {"Enter", "Space", "ArrowDown", "ArrowUp", "Escape", "Tab"}
 
 # Minimum leftover budget worth starting another beat with
 MIN_BEAT_SECONDS = 8
@@ -173,6 +189,320 @@ async def _observe(page) -> dict:
     except Exception:
         pass
     return observation
+
+
+def _control_is_safe(control: dict) -> bool:
+    """Apply the same high-impact-action guard to every live DOM control."""
+    haystack = " ".join(
+        str(control.get(key) or "")
+        for key in ("name", "label", "placeholder", "type", "href")
+    ).lower()
+    if any(term in haystack for term in UNSAFE_CONTROL_TERMS):
+        return False
+    if control.get("disabled"):
+        return False
+    if control.get("role") == "link" and not control.get("internal_link"):
+        return False
+    return bool(control.get("name") or control.get("label") or control.get("placeholder"))
+
+
+async def _discover_live_controls(page) -> list[dict]:
+    """Return a safe, accessibility-oriented inventory of visible controls.
+
+    The inventory intentionally contains no CSS selector and no input values.
+    The model can choose only a short-lived control id from this list; Python
+    resolves that id through accessible locators immediately before acting.
+    """
+    try:
+        controls = await page.evaluate(
+            """() => {
+              const max = 50;
+              const visible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== 'hidden' &&
+                  style.display !== 'none' && Number(style.opacity || 1) > 0 &&
+                  rect.width > 1 && rect.height > 1;
+              };
+              const squash = (value) => String(value || '')
+                .replace(/\\s+/g, ' ').trim().slice(0, 140);
+              const labelFor = (el) => {
+                const id = el.getAttribute('id');
+                const explicit = id
+                  ? document.querySelector(`label[for="${CSS.escape(id)}"]`)
+                  : null;
+                const parent = el.closest('label');
+                return squash((explicit || parent)?.innerText || '');
+              };
+              const inferredRole = (el) => {
+                const explicit = el.getAttribute('role');
+                if (explicit) return explicit;
+                const tag = el.tagName.toLowerCase();
+                const type = el.tagName.toLowerCase() === 'select'
+                  ? 'select' : (el.getAttribute('type') || '').toLowerCase();
+                if (tag === 'button') return 'button';
+                if (tag === 'a') return 'link';
+                if (tag === 'select') return 'combobox';
+                if (tag === 'textarea' || el.isContentEditable) return 'textbox';
+                if (tag === 'input') {
+                  if (type === 'checkbox' || type === 'radio') return type;
+                  if (type === 'number') return 'spinbutton';
+                  return 'textbox';
+                }
+                return '';
+              };
+              const selector = [
+                'button', '[role="button"]', 'a[href]', 'input:not([type="hidden"])',
+                'textarea', 'select', '[role="tab"]', '[role="switch"]',
+                '[role="checkbox"]', '[role="radio"]', '[role="combobox"]',
+                '[contenteditable="true"]'
+              ].join(',');
+              const result = [];
+              for (const el of Array.from(document.querySelectorAll(selector))) {
+                if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+                const role = inferredRole(el);
+                const type = el.tagName.toLowerCase() === 'select'
+                  ? 'select' : (el.getAttribute('type') || '').toLowerCase();
+                const label = squash(el.getAttribute('aria-label') || labelFor(el));
+                const placeholder = squash(el.getAttribute('placeholder'));
+                const name = squash(label || el.innerText || el.textContent ||
+                  placeholder || el.getAttribute('title') || el.getAttribute('name') ||
+                  el.getAttribute('id'));
+                const href = el.tagName.toLowerCase() === 'a'
+                  ? (el.getAttribute('href') || '') : '';
+                const options = el.tagName.toLowerCase() === 'select'
+                  ? Array.from(el.options).filter((option) => !option.disabled)
+                    .map((option) => squash(option.textContent || option.value)).filter(Boolean).slice(0, 12)
+                  : [];
+                let internalLink = true;
+                try {
+                  internalLink = !href || new URL(href, window.location.href).origin === window.location.origin;
+                } catch (_) { internalLink = false; }
+                result.push({
+                  id: `control-${result.length + 1}`,
+                  role, name, label, placeholder, type,
+                  test_id: el.getAttribute('data-testid') || el.getAttribute('data-test') || '',
+                  element_id: el.getAttribute('id') || '',
+                  dom_name: el.getAttribute('name') || '',
+                  href, options, internal_link: internalLink,
+                  disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+                });
+                if (result.length >= max) break;
+              }
+              return result;
+            }"""
+        )
+        return [control for control in controls if _control_is_safe(control)][:MAX_LIVE_CONTROLS]
+    except Exception:
+        return []
+
+
+def _normalise_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _action_matches_control(action: str, control: dict) -> bool:
+    role = control.get("role")
+    if action == "type":
+        return role in {"textbox", "spinbutton", "combobox"}
+    if action == "select":
+        return role in {"combobox", "listbox"}
+    if action == "toggle":
+        return role in {"checkbox", "radio", "switch"}
+    if action == "press":
+        return role in {"textbox", "spinbutton", "combobox", "button"}
+    if action == "click":
+        return role in {"button", "link", "tab", "checkbox", "radio", "switch", "combobox"}
+    return action == "scroll"
+
+
+def _target_score(control: dict, target: object) -> float:
+    target_text = _normalise_text(target)
+    if not target_text:
+        return 0.0
+    fields = [
+        _normalise_text(control.get("name")),
+        _normalise_text(control.get("label")),
+        _normalise_text(control.get("placeholder")),
+        _normalise_text(control.get("test_id")),
+    ]
+    best = 0.0
+    target_words = set(target_text.split())
+    for field in fields:
+        if not field:
+            continue
+        if field == target_text:
+            return 1.0
+        if target_text in field or field in target_text:
+            best = max(best, 0.82)
+        field_words = set(field.split())
+        if target_words and field_words:
+            best = max(best, len(target_words & field_words) / len(target_words | field_words))
+    return best
+
+
+def _ground_planned_step(step: dict | None, controls: list[dict]) -> dict | None:
+    """Bind a repository-planned intention to one current, safe control."""
+    if not isinstance(step, dict):
+        return None
+    action = str(step.get("action") or "").lower()
+    if action == "scroll":
+        return {
+            "action": "scroll", "control_id": None, "value": None,
+            "reason": "Reveal the next learned section.", "beat_complete": False,
+            "expected_result": step.get("expected_result", ""), "planned_step": True,
+        }
+    candidates = [
+        (control, _target_score(control, step.get("target")))
+        for control in controls
+        if _action_matches_control(action, control)
+    ]
+    if not candidates:
+        return None
+    control, score = max(candidates, key=lambda item: item[1])
+    if score < 0.5:
+        return None
+    # Opening a native <select> is not a visible, durable result. Let the live
+    # model choose one of the discovered options as a verified select action.
+    if action == "click" and control.get("type") == "select":
+        return None
+    return {
+        "action": action,
+        "control_id": control["id"],
+        "value": step.get("value"),
+        "reason": f"Perform the learned {action} on {control.get('name') or step.get('target')}.",
+        "beat_complete": False,
+        "expected_result": step.get("expected_result", ""),
+        "planned_step": True,
+    }
+
+
+def _fallback_action(controls: list[dict], actions_taken: list,
+                     planned_step: dict | None, beat: dict) -> dict:
+    """Choose a grounded local action when the navigation model is unavailable."""
+    grounded = _ground_planned_step(planned_step, controls)
+    if grounded:
+        return grounded
+
+    used = {entry.get("control_id") for entry in actions_taken}
+    # A new text field is a useful, visible low-risk interaction even without
+    # an LLM response.  Sensitive/account fields were filtered before here.
+    for control in controls:
+        if (control.get("id") not in used and control.get("role") == "textbox" and
+                _action_matches_control("type", control)):
+            return {
+                "action": "type", "control_id": control["id"], "value": "Demo example",
+                "reason": f"Enter a demo value in {control.get('name')}.",
+                "beat_complete": False, "expected_result": "", "planned_step": False,
+            }
+
+    preferred_terms = ("add", "create", "generate", "start", "try", "next", "open",
+                       "show", "view", "search", "filter", "explore", "continue")
+    for control in controls:
+        if control.get("id") in used or not _action_matches_control("click", control):
+            continue
+        name = _normalise_text(control.get("name"))
+        if control.get("role") == "tab" or any(term in name for term in preferred_terms):
+            return {
+                "action": "click", "control_id": control["id"], "value": None,
+                "reason": f"Open the {control.get('name')} section.",
+                "beat_complete": False, "expected_result": "", "planned_step": False,
+            }
+    return {
+        "action": "scroll", "control_id": None, "value": None,
+        "reason": beat.get("talking_point", ""), "beat_complete": False,
+        "expected_result": "", "planned_step": False,
+    }
+
+
+async def _first_usable(locator):
+    try:
+        count = min(await locator.count(), 5)
+        for index in range(count):
+            candidate = locator.nth(index)
+            if await candidate.is_visible() and await candidate.is_enabled():
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+async def _resolve_control(page, control: dict | None, target: object = ""):
+    """Resolve a control through stable accessibility attributes, never model CSS."""
+    if not control:
+        return None
+    locators = []
+    test_id = control.get("test_id")
+    if test_id:
+        locators.append(page.get_by_test_id(test_id))
+    role = control.get("role")
+    name = control.get("name") or control.get("label") or control.get("placeholder")
+    if role and name:
+        try:
+            locators.append(page.get_by_role(role, name=re.compile(rf"^{re.escape(name)}$", re.I)))
+        except Exception:
+            pass
+    label = control.get("label")
+    if label:
+        locators.append(page.get_by_label(label, exact=True))
+    placeholder = control.get("placeholder")
+    if placeholder:
+        locators.append(page.get_by_placeholder(placeholder, exact=True))
+    element_id = control.get("element_id")
+    if element_id:
+        locators.append(page.locator(f"[id={json.dumps(element_id)}]"))
+    dom_name = control.get("dom_name")
+    if dom_name:
+        locators.append(page.locator(f"[name={json.dumps(dom_name)}]"))
+
+    # The final target lookup is useful when a plan is source-accurate but the
+    # live control omitted an optional accessibility attribute.
+    target_text = str(target or "").strip()
+    if target_text:
+        if role:
+            locators.append(page.get_by_role(role, name=re.compile(re.escape(target_text), re.I)))
+        locators.append(page.get_by_label(target_text, exact=False))
+        locators.append(page.get_by_placeholder(target_text, exact=False))
+
+    for locator in locators:
+        resolved = await _first_usable(locator)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+async def _interaction_state(page) -> dict:
+    """Collect an in-memory fingerprint for post-action verification only."""
+    try:
+        return await page.evaluate(
+            """() => {
+              const root = document.querySelector('main') || document.body;
+              const text = String(root?.innerText || '').replace(/\\s+/g, ' ').slice(0, 2400);
+              const controls = Array.from(document.querySelectorAll(
+                'button, a[href], input, textarea, select, [role="button"], [role="tab"], [role="switch"]'
+              )).slice(0, 40).map((el) => [
+                el.tagName, el.getAttribute('role') || '', el.getAttribute('aria-expanded') || '',
+                el.getAttribute('aria-selected') || '', el.getAttribute('aria-checked') || '',
+                el.checked === undefined ? '' : String(el.checked), el.disabled ? 'disabled' : ''
+              ].join('|')).join('||');
+              return {url: window.location.href, text, controls, scroll_y: Math.round(window.scrollY)};
+            }"""
+        )
+    except Exception:
+        return {"url": page.url, "text": "", "controls": "", "scroll_y": 0}
+
+
+def _state_changed(before: dict, after: dict, expected_result: object = "") -> bool:
+    if before.get("url") != after.get("url"):
+        return True
+    if before.get("text") != after.get("text"):
+        return True
+    if before.get("controls") != after.get("controls"):
+        return True
+    if abs(int(before.get("scroll_y", 0)) - int(after.get("scroll_y", 0))) > 8:
+        return True
+    expected = _normalise_text(expected_result)
+    return bool(expected and expected in _normalise_text(after.get("text")))
 
 
 async def _close_unexpected_popups(page) -> None:
@@ -572,8 +902,8 @@ async def _complete_onboarding(page, job_id: str, capture_state: dict) -> None:
             return
 
 
-async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
-                           seconds_left: float, app_summary: str) -> dict:
+async def _legacy_get_next_action(observation: dict, beat: dict, actions_taken: list,
+                                  seconds_left: float, app_summary: str) -> dict:
     """Ask the LLM for the single best next micro-action within this beat."""
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     default = {"action": "scroll", "selector": None, "value": None,
@@ -648,7 +978,7 @@ Return ONLY valid JSON:
         return default
 
 
-async def _perform_action(page, decision: dict) -> bool:
+async def _legacy_perform_action(page, decision: dict) -> bool:
     """Execute a micro-action. Returns True only if its effect on the page
     could be confirmed — a click that didn't error but also didn't change
     anything (checkbox state, DOM) counts as a failure, not a success."""
@@ -708,6 +1038,234 @@ async def _perform_action(page, decision: dict) -> bool:
         return False  # "wait" — no state change expected
     except Exception:
         return False
+
+
+def _normalise_live_decision(raw: object, controls: list[dict], fallback: dict,
+                             planned_step: dict | None) -> dict:
+    """Reject model output that is not grounded to the supplied live controls."""
+    if not isinstance(raw, dict):
+        return fallback
+    action = str(raw.get("action") or "").lower().strip()
+    if action not in SAFE_ACTIONS:
+        return fallback
+    if action == "scroll":
+        return {
+            "action": "scroll", "control_id": None, "value": None,
+            "reason": str(raw.get("reason") or fallback.get("reason") or "")[:240],
+            "beat_complete": bool(raw.get("beat_complete")),
+            "expected_result": "", "planned_step": False,
+        }
+
+    control_id = str(raw.get("control_id") or "")
+    control = next((item for item in controls if item.get("id") == control_id), None)
+    if control is None or not _control_is_safe(control) or not _action_matches_control(action, control):
+        return fallback
+
+    planned_action = str((planned_step or {}).get("action") or "").lower()
+    value = raw.get("value")
+    if planned_action == action and planned_step and planned_step.get("value") is not None:
+        value = planned_step.get("value")
+    if value is not None:
+        value = str(value).strip()[:240]
+    if action in {"type", "select", "press"} and not value:
+        return fallback
+    if action == "press" and value not in ALLOWED_KEYS:
+        return fallback
+
+    matches_plan = bool(
+        planned_step and planned_action == action and
+        _target_score(control, planned_step.get("target")) >= 0.5
+    )
+    return {
+        "action": action,
+        "control_id": control_id,
+        "value": value,
+        "target": (planned_step or {}).get("target") or control.get("name", ""),
+        "reason": str(raw.get("reason") or "")[:240],
+        "beat_complete": bool(raw.get("beat_complete")),
+        "expected_result": str(
+            raw.get("expected_result") or (planned_step or {}).get("expected_result") or ""
+        )[:180],
+        "planned_step": matches_plan,
+    }
+
+
+async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
+                           seconds_left: float, app_summary: str,
+                           controls: list[dict],
+                           planned_step: dict | None = None) -> dict:
+    """Choose one action from the live, safe control inventory.
+
+    A repository-planned step is executed directly when it cleanly matches a
+    current control.  The model is used only to disambiguate a drifted layout
+    or choose the next safe section; it can never invent a selector.
+    """
+    fallback = _fallback_action(controls, actions_taken, planned_step, beat)
+    grounded = _ground_planned_step(planned_step, controls)
+    if grounded is not None:
+        return grounded
+
+    gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
+    if not gmi_api_key:
+        return fallback
+
+    control_summary = [
+        {
+            "id": control.get("id"), "role": control.get("role"),
+            "name": control.get("name"), "label": control.get("label"),
+            "placeholder": control.get("placeholder"), "type": control.get("type"),
+            "options": control.get("options", []),
+        }
+        for control in controls
+    ]
+    user_prompt = f"""You are driving a live browser to record a product demo.
+
+App: {app_summary}
+Current demo beat:
+- Feature: {beat.get('feature')}
+- Learned workflow: {beat.get('actions_hint')}
+- Talking point: {beat.get('talking_point')}
+- Seconds left: {int(seconds_left)}
+
+Next repository-planned interaction (may be null if all planned steps are done):
+{json.dumps(planned_step or None)}
+
+What is currently visible:
+- URL: {observation.get('url')}
+- Page title: {observation.get('title')}
+- Headings: {json.dumps(observation.get('headings', []))}
+- Visible text: {observation.get('visible_text', '')[:500]}
+
+Live safe controls. You may use ONLY one of these ids; never write a CSS
+selector or a control name that is not in this list:
+{json.dumps(control_summary, ensure_ascii=False)}
+
+Actions already taken in this beat:
+{json.dumps(actions_taken[-4:], indent=2)}
+
+Choose one meaningful, safe action. Prefer the repository-planned interaction
+when it has a matching live control. Do not open external links, edit account
+or billing settings, send/share/invite, sign out, delete/remove, pay, publish,
+or deploy. Use type only for a non-sensitive visible field and give realistic
+demo text. Set beat_complete true only after the learned result is on screen.
+
+Return ONLY valid JSON:
+{{
+  "action": "click" | "type" | "select" | "toggle" | "press" | "scroll",
+  "control_id": "control-1" | null,
+  "value": "text, option, or an allowed key for type/select/press; otherwise null",
+  "expected_result": "optional visible text after the action",
+  "reason": "one short sentence",
+  "beat_complete": true | false
+}}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            response = await client.post(
+                GMI_CHAT_URL,
+                headers={"Authorization": f"Bearer {gmi_api_key}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": NAV_MODEL,
+                    "messages": [
+                        {"role": "system", "content":
+                         "You are an expert product-demo browser operator. "
+                         "Respond only with valid JSON and use only supplied control ids."},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 500,
+                },
+            )
+        if response.status_code != 200:
+            return fallback
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        return _normalise_live_decision(json.loads(content.strip()), controls, fallback, planned_step)
+    except Exception:
+        return fallback
+
+
+async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
+    """Execute and verify one grounded interaction before it is recorded."""
+    action = decision.get("action", "")
+    control = next(
+        (item for item in controls if item.get("id") == decision.get("control_id")),
+        None,
+    )
+    before = await _interaction_state(page)
+
+    try:
+        if action == "scroll":
+            await page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
+            await page.wait_for_timeout(INTERACTION_SETTLE_MS)
+            after = await _interaction_state(page)
+            return {"succeeded": _state_changed(before, after), "effect": "scroll", "state": after}
+
+        locator = await _resolve_control(page, control, decision.get("target", ""))
+        if locator is None:
+            return {"succeeded": False, "effect": "control-not-found", "state": before}
+
+        value = decision.get("value")
+        if action == "type":
+            await locator.fill(str(value), timeout=ACTION_TIMEOUT_MS)
+            await page.wait_for_timeout(250)
+            after = await _interaction_state(page)
+            try:
+                succeeded = (await locator.input_value()) == str(value)
+            except Exception:
+                succeeded = _state_changed(before, after)
+            return {"succeeded": succeeded, "effect": "field-filled", "state": after}
+
+        if action == "select":
+            try:
+                previous_value = await locator.input_value()
+            except Exception:
+                previous_value = None
+            try:
+                await locator.select_option(label=str(value), timeout=ACTION_TIMEOUT_MS)
+            except Exception:
+                await locator.select_option(value=str(value), timeout=ACTION_TIMEOUT_MS)
+            await page.wait_for_timeout(INTERACTION_SETTLE_MS)
+            after = await _interaction_state(page)
+            try:
+                selected_value = await locator.input_value()
+            except Exception:
+                selected_value = None
+            return {
+                "succeeded": (selected_value != previous_value or
+                              _state_changed(before, after, decision.get("expected_result"))),
+                "effect": "option-selected", "state": after,
+            }
+
+        if action == "toggle" and control and control.get("role") in {"checkbox", "radio"}:
+            await locator.check(timeout=ACTION_TIMEOUT_MS)
+            succeeded = await locator.is_checked()
+        elif action == "press":
+            key = str(value)
+            if key not in ALLOWED_KEYS:
+                return {"succeeded": False, "effect": "unsafe-key", "state": before}
+            await locator.press(key, timeout=ACTION_TIMEOUT_MS)
+            succeeded = True
+        elif action == "click" or action == "toggle":
+            await locator.click(timeout=ACTION_TIMEOUT_MS)
+            succeeded = True
+        else:
+            return {"succeeded": False, "effect": "unsupported-action", "state": before}
+
+        await page.wait_for_timeout(INTERACTION_SETTLE_MS)
+        after = await _interaction_state(page)
+        # A click that throws no exception but leaves the app unchanged is not
+        # a successful demo interaction.  This closes the old no-op loophole.
+        succeeded = succeeded and _state_changed(before, after, decision.get("expected_result"))
+        return {"succeeded": succeeded, "effect": action, "state": after}
+    except Exception:
+        return {"succeeded": False, "effect": "action-error", "state": before}
 
 
 async def record_app(app_url: str, repo_context: dict = None,
@@ -832,7 +1390,14 @@ async def record_app(app_url: str, repo_context: dict = None,
 
                 beat_camera_start = elapsed()
                 actions_taken = []
-                max_actions = 6
+                planned_steps = [
+                    step for step in beat.get("interaction_steps", [])
+                    if isinstance(step, dict)
+                ]
+                planned_step_index = 0
+                # Leave room for a live-DOM follow-up while ensuring every
+                # repo-learned workflow step gets a chance on camera.
+                max_actions = min(10, max(4, len(planned_steps) + 3))
 
                 for _ in range(max_actions):
                     beat_camera_used = elapsed() - beat_camera_start
@@ -842,18 +1407,24 @@ async def record_app(app_url: str, repo_context: dict = None,
 
                     segment_start = elapsed()
                     observation = await _observe(page)
+                    controls = await _discover_live_controls(page)
+                    planned_step = (
+                        planned_steps[planned_step_index]
+                        if planned_step_index < len(planned_steps) else None
+                    )
                     decision = await _get_next_action(
                         observation, beat, actions_taken, seconds_left,
-                        app_summary)
+                        app_summary, controls, planned_step)
 
                     url_before_action = urldefrag(page.url)[0]
-                    action_succeeded = await _perform_action(page, decision)
+                    action_result = await _perform_action(page, decision, controls)
+                    action_succeeded = bool(action_result.get("succeeded"))
 
                     # Let the result of the action settle and be visible on
                     # camera long enough for the viewer to read/absorb it.
-                    await page.wait_for_timeout(4000)
+                    await page.wait_for_timeout(2800)
                     url_after_action = urldefrag(page.url)[0]
-                    if job_id and url_after_action != url_before_action:
+                    if job_id and (action_succeeded or url_after_action != url_before_action):
                         try:
                             await page.wait_for_load_state(
                                 "domcontentloaded", timeout=SETTLE_TIMEOUT_MS)
@@ -876,14 +1447,14 @@ async def record_app(app_url: str, repo_context: dict = None,
                     if not action_succeeded and page_unchanged:
                         actions_taken.append({
                             "action": decision.get("action"),
-                            "selector": decision.get("selector"),
+                            "control_id": decision.get("control_id"),
                             "reason": "STUCK — no visible effect, skipping",
                         })
                         logger.warning(
                             "Beat '%s' stuck on action %s (selector=%s) — "
                             "no page change detected, ending beat early",
                             beat.get("feature"), decision.get("action"),
-                            decision.get("selector"))
+                            decision.get("control_id"))
                         break  # reclaim remaining beat_seconds for later beats
 
                     segment_end = elapsed()
@@ -902,11 +1473,18 @@ async def record_app(app_url: str, repo_context: dict = None,
                     })
                     actions_taken.append({
                         "action": decision.get("action"),
-                        "selector": decision.get("selector"),
+                        "control_id": decision.get("control_id"),
                         "reason": decision.get("reason", ""),
                     })
 
-                    if decision.get("beat_complete"):
+                    if decision.get("planned_step") and planned_step_index < len(planned_steps):
+                        planned_step_index += 1
+
+                    # Once the intended repository-informed workflow is
+                    # visible, move to the next learned section rather than
+                    # spending the rest of the beat on generic scrolling.
+                    if (decision.get("beat_complete") or
+                            (planned_steps and planned_step_index >= len(planned_steps))):
                         break
 
                 camera_used += elapsed() - beat_camera_start
