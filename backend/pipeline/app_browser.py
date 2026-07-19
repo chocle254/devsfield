@@ -1300,7 +1300,10 @@ async def record_app(app_url: str, repo_context: dict = None,
 
     # Total wall-clock budget for on-camera time. Loading time is excluded
     # from segments, but still consumes real time — so we track both.
-    camera_budget = max(30, video_length - 6)
+    # The final assembler adds a three-second title card.  Keep the recorded
+    # screen time aligned with the requested total duration rather than
+    # reserving an unexplained extra three seconds.
+    camera_budget = max(30, video_length - 3)
     # Never let the whole recording session (including slow loads) run more
     # than 2x the camera budget — that's the slow-network kill switch.
     session_budget = camera_budget * 2
@@ -1389,6 +1392,9 @@ async def record_app(app_url: str, repo_context: dict = None,
                         await _capture_snapshot(page, job_id, capture_state)
 
                 beat_camera_start = elapsed()
+                beat_start_segment_id = segment_id
+                beat_completed = False
+                beat_stuck = False
                 actions_taken = []
                 planned_steps = [
                     step for step in beat.get("interaction_steps", [])
@@ -1455,6 +1461,7 @@ async def record_app(app_url: str, repo_context: dict = None,
                             "no page change detected, ending beat early",
                             beat.get("feature"), decision.get("action"),
                             decision.get("control_id"))
+                        beat_stuck = True
                         break  # reclaim remaining beat_seconds for later beats
 
                     segment_end = elapsed()
@@ -1485,7 +1492,28 @@ async def record_app(app_url: str, repo_context: dict = None,
                     # spending the rest of the beat on generic scrolling.
                     if (decision.get("beat_complete") or
                             (planned_steps and planned_step_index >= len(planned_steps))):
+                        beat_completed = True
                         break
+
+                if (not beat_stuck and segment_id > beat_start_segment_id and
+                        (not planned_steps or
+                         planned_step_index >= len(planned_steps))):
+                    beat_completed = True
+
+                # ``seconds`` is a planned on-camera duration, not merely an
+                # action-loop timeout.  Once a successful learned workflow is
+                # visible, hold that meaningful result on screen for the rest
+                # of the beat so script writing and assembly receive the
+                # intended duration.  Extending the final successful segment
+                # also lets its narration explain the visible result instead
+                # of adding a disconnected frozen outro.
+                remaining = beat_seconds - (elapsed() - beat_camera_start)
+                session_remaining = session_budget - elapsed()
+                hold_seconds = min(remaining, session_remaining)
+                if (beat_completed and segment_id > beat_start_segment_id and
+                        hold_seconds >= 0.25):
+                    await page.wait_for_timeout(int(hold_seconds * 1000))
+                    segments[-1]["end_time"] = round(elapsed(), 2)
 
                 camera_used += elapsed() - beat_camera_start
 

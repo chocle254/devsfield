@@ -140,12 +140,19 @@ async def upload_all(job_id: str, final_video_path: str,
             backend.put, clip_key, clip_data, content_type="video/mp4")
         clip_url = await asyncio.to_thread(_url_for, backend, clip_key)
 
-        with open(seg["voice_path"], "rb") as f:
-            voice_data = f.read()
-        voice_key = f"jobs/{job_id}/segments/{seg_id}/voice.mp3"
-        await asyncio.to_thread(
-            backend.put, voice_key, voice_data, content_type="audio/mpeg")
-        voice_url = await asyncio.to_thread(_url_for, backend, voice_key)
+        # TTS is intentionally non-fatal.  Keep a successfully rendered
+        # silent segment downloadable instead of failing the entire upload
+        # because it has no individual voice file.
+        voice_key = None
+        voice_url = None
+        voice_path = seg.get("voice_path")
+        if voice_path and os.path.isfile(voice_path):
+            with open(voice_path, "rb") as f:
+                voice_data = f.read()
+            voice_key = f"jobs/{job_id}/segments/{seg_id}/voice.mp3"
+            await asyncio.to_thread(
+                backend.put, voice_key, voice_data, content_type="audio/mpeg")
+            voice_url = await asyncio.to_thread(_url_for, backend, voice_key)
 
         segment_manifest.append({
             "segment_id": seg_id,
@@ -174,6 +181,10 @@ async def upload_all(job_id: str, final_video_path: str,
     # Provenance manifest
     manifest = {
         "job_id": job_id,
+        # v2 uses normalized streams plus filter-graph concat with a duration
+        # check.  /download uses this to distinguish it from legacy masters
+        # that may have been produced by the truncating glue path.
+        "assembly_version": 2,
         "video_key": video_key,
         "segments_key": segments_key,
         "github_url": github_url,
@@ -203,6 +214,7 @@ async def upload_all(job_id: str, final_video_path: str,
     # are re-generated on every read (resolve_result_urls) so they never expire
     # from the user's perspective, while the keys are what survive restarts.
     return {
+        "assembly_version": manifest["assembly_version"],
         "video_key": video_key,
         "manifest_key": manifest_key,
         "segments_key": segments_key,
@@ -232,6 +244,7 @@ def _result_from_manifest(manifest: dict, segments: list = None) -> dict:
     fresh browser-loadable URLs before returning to a client.
     """
     return {
+        "assembly_version": manifest.get("assembly_version", 0),
         "video_key": manifest.get("video_key"),
         "manifest_key": manifest.get("manifest_key")
             or f"jobs/{manifest.get('job_id')}/manifest.json",
@@ -341,13 +354,11 @@ async def list_library() -> list[dict]:
             pass
             
 async def get_glued_download_url(job_id: str) -> str | None:
-    """Return a URL to the full video with every segment glued together.
+    """Rebuild a downloadable video for legacy jobs without a verified master.
 
-    The stored ``final_video.mp4`` was produced by the pipeline; if it looks
-    truncated (or you simply always want the segments re-glued at download
-    time), this rebuilds one continuous MP4 from the per-segment clips —
-    played back to back, with each segment's voiceover, no black frames — and
-    caches it on B2 as ``final_glued.mp4`` so repeat downloads are instant.
+    New jobs serve their pipeline-produced ``final_video.mp4`` directly.  For
+    older jobs, rebuild one continuous MP4 from the per-segment clips and
+    cache it as ``final_glued_v2.mp4``.
 
     Returns a fresh, browser-loadable URL, or None if the job has no segments
     to glue (in which case callers fall back to the original video).
@@ -358,7 +369,10 @@ async def get_glued_download_url(job_id: str) -> str | None:
         # Serve the cached glued video if we've already built it. We probe the
         # object with a lightweight get; if it's present we just re-mint a URL
         # for the existing key instead of rebuilding.
-        glued_key = f"jobs/{job_id}/final_glued.mp4"
+        # Keep this cache versioned.  Earlier download normalisation could
+        # produce a truncated glued file, so reusing the old object would make
+        # the fix appear ineffective for an existing job.
+        glued_key = f"jobs/{job_id}/final_glued_v2.mp4"
         try:
             await asyncio.to_thread(backend.get, glued_key)
             return await asyncio.to_thread(_url_for, backend, glued_key)

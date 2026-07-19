@@ -7,17 +7,17 @@ Every ffmpeg call goes through segment_tool.run_subprocess, which enforces a
 hard timeout so a hung encode fails the job cleanly instead of stalling the
 whole pipeline forever.
 
-IMPORTANT — why the final video used to be short / silent / smaller than the
-segments: the concat *demuxer* (`-f concat`) does NOT re-encode or reconcile
-streams. If the pieces disagree on resolution, framerate, pixel format,
-timebase or audio layout — or if any piece is missing an audio track (the
-title card had none) — the muxed output silently drops audio and can stop at
-the first stream boundary, producing a tiny, voiceless, truncated file.
+IMPORTANT — why the final video can be short / silent / smaller than the
+segments: independently rendered MP4 clips can disagree on resolution,
+framerate, pixel format, timebase, audio layout, or AAC timing. A naive concat
+can then drop audio or stop at a stream boundary, producing a tiny, truncated
+file.
 
 The fix is to normalize EVERY piece to one canonical spec (resolution, fps,
 pixel format, SAR, and a real stereo AAC audio track — silent for the title
-card) before concatenating. `concat_segments` is shared with the on-demand
-download endpoint so downloads glue the exact same way.
+card), concatenate through ffmpeg's filter graph, and verify output duration.
+`concat_segments` is shared with the on-demand download endpoint so downloads
+glue the exact same way.
 """
 import os
 from typing import Optional
@@ -126,15 +126,17 @@ async def normalize_clip(input_path: str, output_path: str) -> str:
     audio track, a silent stereo track is synthesized so concat never drops
     audio for the whole video.
     """
+    # IMPORTANT: do not merge a tiny silent source into existing audio.  The
+    # old implementation used a 0.1-second `anullsrc` with `amerge` and then
+    # `-shortest`; ffmpeg correctly stopped each normalized download segment
+    # at ~0.1s, so the on-demand glued download was drastically truncated.
+    # When audio exists, simply normalize that source audio.  The no-audio
+    # fallback below creates silence for the full clip duration instead.
     cmd = [
         "ffmpeg",
         "-i", input_path,
-        "-f", "lavfi", "-t", "0.1",
-        "-i", f"anullsrc=channel_layout=stereo:sample_rate={OUT_SR}",
-        "-filter_complex",
-        f"[0:v]{_SCALE_PAD}[v];"
-        f"[0:a][1:a]amerge=inputs=2,aresample={OUT_SR},pan=stereo|c0<c0|c1<c1[a]",
-        "-map", "[v]", "-map", "[a]",
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-vf", _SCALE_PAD,
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", str(OUT_SR), "-ac", "2",
         "-shortest",
@@ -167,26 +169,45 @@ async def concat_segments(clip_paths: list[str], output_path: str,
                           job_id: str) -> str:
     """Concatenate already-normalized clips into one continuous MP4.
 
-    Uses the concat demuxer with re-encode as a safety net. Because every input
-    was produced by `_merge_segment` / `_render_title_card` they share the same
-    resolution, fps, pixel format and stereo AAC audio, so the result keeps the
-    full length and the voiceover of every segment.
+    Use ffmpeg's concat *filter* rather than its concat demuxer.  The filter
+    creates one continuous audio/video timeline even when segment timestamps or
+    AAC encoder delay differ slightly, which is common with independently
+    rendered clips.  It also lets us verify that the resulting download still
+    covers the duration of every input clip.
     """
-    concat_list_path = f"/tmp/concat_{job_id}.txt"
-    with open(concat_list_path, "w") as f:
-        for path in clip_paths:
-            # Escape single quotes for the concat list format.
-            safe = path.replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
+    if not clip_paths:
+        raise ValueError("Cannot concatenate an empty clip list")
+
+    # ``get_duration`` is asynchronous, so resolve each probe before adding
+    # them.  Passing an async generator directly to ``sum`` raises before
+    # ffmpeg is invoked.
+    expected_duration = sum([await get_duration(path) for path in clip_paths])
+    input_args: list[str] = []
+    filter_inputs = []
+    for index, path in enumerate(clip_paths):
+        input_args.extend(["-i", path])
+        filter_inputs.append(f"[{index}:v:0][{index}:a:0]")
+    concat_filter = "".join(filter_inputs) + f"concat=n={len(clip_paths)}:v=1:a=1[v][a]"
 
     cmd = [
-        "ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+        "ffmpeg", *input_args,
+        "-filter_complex", concat_filter,
+        "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", str(OUT_SR), "-ac", "2",
         "-movflags", "+faststart",
         output_path, "-y",
     ]
     await run_subprocess(cmd, timeout=CONCAT_TIMEOUT, label="Final concat")
+
+    actual_duration = await get_duration(output_path)
+    # Frame rounding and AAC priming can cost a few milliseconds per input;
+    # anything larger means a clip was silently dropped or truncated.
+    tolerance = max(0.35, len(clip_paths) * 0.08)
+    if actual_duration + tolerance < expected_duration:
+        raise RuntimeError(
+            f"Final concat was truncated ({actual_duration:.2f}s rendered, "
+            f"expected about {expected_duration:.2f}s)")
     return output_path
 
 

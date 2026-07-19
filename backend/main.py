@@ -209,23 +209,38 @@ async def get_result(job_id: str):
 
 @app.get("/download/{job_id}")
 async def get_download(job_id: str):
-    """Return a URL to the full video with all segments glued together.
+    """Return the canonical final MP4, with legacy re-gluing as fallback.
 
-    The player streams the segment clips back-to-back, but the *download* is a
-    single continuous MP4. We build it on demand from the stored per-segment
-    clips (each with its own voiceover, no black frames) and cache it on B2.
-    Falls back to the original final video if gluing isn't possible.
+    v2 ``final_video.mp4`` is assembled and duration-verified by the pipeline,
+    so it is the authoritative artifact for new downloads.  Older manifests
+    use the repaired segment rebuild once, even if their original master file
+    still exists.
     """
+    result = await storage.load_result_from_b2(job_id)
+    if result is not None:
+        result = await storage.resolve_result_urls(result)
+        # Pre-v2 masters may already be truncated.  Rebuild those older jobs
+        # from their full per-segment clips with the repaired normalizer.
+        try:
+            assembly_version = int(result.get("assembly_version", 0))
+        except (TypeError, ValueError):
+            assembly_version = 0
+        if assembly_version >= 2:
+            video_url = result.get("video_url")
+            if video_url:
+                return {"job_id": job_id, "video_url": video_url}
+
+    # Legacy fallback for jobs that predate the verified v2 assembly.
     glued_url = await storage.get_glued_download_url(job_id)
     if glued_url:
         return {"job_id": job_id, "video_url": glued_url}
 
-    # Fallback: hand back the original final video.
-    result = await storage.load_result_from_b2(job_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    result = await storage.resolve_result_urls(result)
-    return {"job_id": job_id, "video_url": result.get("video_url")}
+    # An older job may not retain individual clips. Its original master is
+    # still the best downloadable artifact in that exceptional case.
+    if result is not None and result.get("video_url"):
+        return {"job_id": job_id, "video_url": result["video_url"]}
+
+    raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/library")
