@@ -28,6 +28,7 @@ Key behaviors:
   closed and ignored if one appears.
 """
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -50,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3.2"
+NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+VISION_NAV_MODEL = "qwen/qwen3.5-397b-a17b"
 
 # How long we're willing to wait for a page before moving on (slow networks)
 GOTO_TIMEOUT_MS = 25000
@@ -57,6 +60,17 @@ SETTLE_TIMEOUT_MS = 6000
 ACTION_TIMEOUT_MS = 5000
 INTERACTION_SETTLE_MS = 900
 MAX_LIVE_CONTROLS = 36
+SENSITIVE_FIELD_SELECTOR = (
+    "input[type='password'], input[name*='password' i], "
+    "input[name*='secret' i], input[name*='token' i], "
+    "input[type='email'], input[name*='email' i], "
+    "input[name*='user' i], input[autocomplete='username'], "
+    "input[autocomplete='current-password'], "
+    "input[autocomplete='new-password']"
+)
+# NVIDIA accepts inline images only below its documented 180 KB threshold.
+# Keep the raw JPEG smaller so its base64 data URL remains safely inline.
+MAX_INLINE_REASONING_FRAME_BYTES = 130 * 1024
 
 # The model is allowed to demonstrate product workflows, not mutate account,
 # billing, publishing, or other high-impact state.  Authentication has its own
@@ -108,14 +122,7 @@ async def _capture_snapshot(page, job_id: str, capture_state: dict) -> None:
     try:
         # Playwright masks matching elements in the image itself. Values never
         # enter metadata or the SSE payload.
-        sensitive_fields = page.locator(
-            "input[type='password'], input[name*='password' i], "
-            "input[name*='secret' i], input[name*='token' i], "
-            "input[type='email'], input[name*='email' i], "
-            "input[name*='user' i], input[autocomplete='username'], "
-            "input[autocomplete='current-password'], "
-            "input[autocomplete='new-password']"
-        )
+        sensitive_fields = page.locator(SENSITIVE_FIELD_SELECTOR)
         await page.screenshot(
             path=file_path,
             type="jpeg",
@@ -160,6 +167,33 @@ async def _capture_snapshot(page, job_id: str, capture_state: dict) -> None:
                 os.remove(file_path)
         except OSError:
             pass
+
+
+async def _capture_reasoning_frame(page) -> str | None:
+    """Return a masked, inline JPEG for visual navigation reasoning.
+
+    This intentionally stays in memory: it is model input only, never a
+    snapshot asset.  It uses the same sensitive-field mask as reel snapshots
+    and refuses images too large for NVIDIA's inline image limit.
+    """
+    try:
+        sensitive_fields = page.locator(SENSITIVE_FIELD_SELECTOR)
+        # A first pass keeps detail for small/simple UIs; a second pass makes
+        # dense pages fit the provider's inline image limit without uploads.
+        for quality in (55, 30):
+            image = await page.screenshot(
+                type="jpeg",
+                quality=quality,
+                full_page=False,
+                animations="disabled",
+                caret="hide",
+                mask=[sensitive_fields],
+            )
+            if len(image) <= MAX_INLINE_REASONING_FRAME_BYTES:
+                return base64.b64encode(image).decode("ascii")
+    except Exception:
+        pass
+    return None
 
 
 async def _observe(page) -> dict:
@@ -1093,7 +1127,7 @@ def _normalise_live_decision(raw: object, controls: list[dict], fallback: dict,
 async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
                            seconds_left: float, app_summary: str,
                            controls: list[dict],
-                           planned_step: dict | None = None) -> dict:
+                           planned_step: dict | None = None, page=None) -> dict:
     """Choose one action from the live, safe control inventory.
 
     A repository-planned step is executed directly when it cleanly matches a
@@ -1106,7 +1140,12 @@ async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
         return grounded
 
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
-    if not gmi_api_key:
+    nvidia_api_key = os.environ.get("NVIDIA_API_KEY")
+    if not gmi_api_key or not nvidia_api_key or page is None:
+        return fallback
+
+    reasoning_frame = await _capture_reasoning_frame(page)
+    if not reasoning_frame:
         return fallback
 
     control_summary = [
@@ -1162,16 +1201,22 @@ Return ONLY valid JSON:
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             response = await client.post(
-                GMI_CHAT_URL,
-                headers={"Authorization": f"Bearer {gmi_api_key}",
+                NVIDIA_CHAT_URL,
+                headers={"Authorization": f"Bearer {nvidia_api_key}",
+                         "Accept": "application/json",
                          "Content-Type": "application/json"},
                 json={
-                    "model": NAV_MODEL,
+                    "model": VISION_NAV_MODEL,
                     "messages": [
                         {"role": "system", "content":
                          "You are an expert product-demo browser operator. "
                          "Respond only with valid JSON and use only supplied control ids."},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": user_prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/jpeg;base64,{reasoning_frame}",
+                            }},
+                        ]},
                     ],
                     "temperature": 0.2,
                     "max_tokens": 500,
@@ -1420,7 +1465,7 @@ async def record_app(app_url: str, repo_context: dict = None,
                     )
                     decision = await _get_next_action(
                         observation, beat, actions_taken, seconds_left,
-                        app_summary, controls, planned_step)
+                        app_summary, controls, planned_step, page=page)
 
                     url_before_action = urldefrag(page.url)[0]
                     action_result = await _perform_action(page, decision, controls)
