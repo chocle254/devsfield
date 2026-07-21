@@ -4,12 +4,13 @@ Generates one voiceover clip per script segment using genblaze-gmicloud
 pipeline already relies on — no separate ElevenLabs account is required, which
 also avoids ElevenLabs' free-tier block on cloud/data-center IPs.
 
-Voice is NON-FATAL: if TTS fails for a segment (or every candidate model is
-unavailable on the account), that segment comes back with ``audio_path=None``
-and the pipeline keeps going, producing a silent-but-complete segment instead
-of failing the whole job.
+Voice is required for every segment. A generated asset is only accepted after
+it has been materialized, checked to be non-empty, and successfully probed by
+ffprobe. This prevents the video assembler from quietly producing an all- or
+partially-silent final video when a provider returns a bad asset.
 """
 import asyncio
+import math
 import os
 import re
 import shutil
@@ -19,11 +20,18 @@ import httpx
 from genblaze_core import Pipeline, Modality
 from genblaze_gmicloud import GMICloudAudioProvider
 
+from .segment_tool import get_duration
+
 MAX_CONCURRENT = 1
 
 # Per-segment generation timeout. GMI audio runs through a request queue, so it
 # needs a more generous budget than a direct HTTP TTS call.
 GEN_TIMEOUT = 120
+
+# A valid narration asset must contain actual, playable audio. ffprobe is
+# already bounded by segment_tool's timeout, so this validation cannot hang a
+# job indefinitely.
+MIN_VALID_AUDIO_SECONDS = 0.05
 
 
 async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.0) -> None:
@@ -48,6 +56,31 @@ async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.
         raise RuntimeError(f"Generated asset not found on disk: {src}")
     if os.path.abspath(src) != os.path.abspath(dest_path):
         shutil.copyfile(src, dest_path)
+
+
+async def _validate_audio_asset(path: str) -> float:
+    """Return a valid asset's duration, or raise a clear validation error."""
+    if not os.path.isfile(path):
+        raise RuntimeError(f"Generated audio asset was not written: {path}")
+
+    size = os.path.getsize(path)
+    if size <= 0:
+        raise RuntimeError(f"Generated audio asset is empty: {path}")
+
+    duration = await get_duration(path)
+    if not math.isfinite(duration) or duration < MIN_VALID_AUDIO_SECONDS:
+        raise RuntimeError(
+            f"Generated audio asset has invalid duration ({duration!r}s): {path}")
+    return duration
+
+
+def _remove_incomplete_asset(path: str) -> None:
+    """Avoid a failed attempt being mistaken for a later successful one."""
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 # Candidate (model, {gender: voice_id}) combos, ordered by preference. We try
@@ -128,25 +161,49 @@ async def generate_segment_voices(script_segments: list[dict],
     async def process(seg: dict) -> dict:
         segment_id = seg["segment_id"]
         text = _prep_text(seg.get("text", ""))
+        if not text:
+            raise ValueError(
+                f"Voice generation requires non-empty narration text for "
+                f"segment {segment_id}")
+
         audio_path: str | None = None
+        attempt_errors: list[str] = []
 
         async with semaphore:
+            candidates = [(m, voices[gender]) for m, voices in _CANDIDATES]
             if working:
-                attempts = [working["combo"]]
+                # Prefer the known-good combination, but if it starts failing
+                # (quota, transient provider issue, bad asset), exhaust every
+                # remaining candidate before failing this segment.
+                locked_combo = working["combo"]
+                attempts = [locked_combo] + [
+                    combo for combo in candidates if combo != locked_combo
+                ]
             else:
-                attempts = [(m, voices[gender]) for m, voices in _CANDIDATES]
+                attempts = candidates
 
             for model, voice_id in attempts:
+                path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
                 try:
+                    _remove_incomplete_asset(path)
                     asset_url = await asyncio.to_thread(
                         _generate_one, job_id, segment_id, text,
                         model, voice_id, gmi_api_key)
-                    path = f"/tmp/voice_{job_id}_seg{segment_id}.mp3"
+                    if not isinstance(asset_url, str) or not asset_url.strip():
+                        raise RuntimeError("provider returned no audio asset URL")
                     await materialize_asset(asset_url, path, timeout=60.0)
+                    duration = await _validate_audio_asset(path)
                     audio_path = path
                     working["combo"] = (model, voice_id)
+                    print(
+                        f"[voice] segment {segment_id} generated "
+                        f"{duration:.2f}s audio with {model}",
+                        flush=True,
+                    )
                     break
-                except Exception as exc:  # noqa: BLE001 — non-fatal by design
+                except Exception as exc:  # noqa: BLE001 - try bounded fallbacks
+                    _remove_incomplete_asset(path)
+                    attempt_errors.append(f"{model}: {exc}")
                     print(
                         f"[voice] segment {segment_id} attempt failed "
                         f"({model}): {exc}",
@@ -155,11 +212,11 @@ async def generate_segment_voices(script_segments: list[dict],
                     continue
 
         if audio_path is None:
-            print(
-                f"[voice] segment {segment_id}: no TTS model succeeded — "
-                f"segment will be silent",
-                flush=True,
-            )
+            tried_models = ", ".join(model for model, _ in attempts)
+            details = "; ".join(attempt_errors)
+            raise RuntimeError(
+                f"Voice generation failed for segment {segment_id}: no valid "
+                f"non-empty audio asset after trying {tried_models}. {details}")
         return {**seg, "text": text, "audio_path": audio_path}
 
     # Sequential (semaphore=1) so the first success can lock the working combo

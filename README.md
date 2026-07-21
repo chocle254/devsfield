@@ -183,6 +183,7 @@ Environment Variables
 Create backend/.env:
 GITHUB_TOKEN=            # GitHub personal access token — required
 GMI_CLOUD_API_KEY=       # Covers LLM, TTS, and image generation via GMI Cloud
+NVIDIA_API_KEY=          # Qwen vision navigation fallback via build.nvidia.com
 B2_BUCKET=devfields-media
 B2_PUBLIC_URL=           # e.g. https://f005.backblazeb2.com/file/devfields-media
 

@@ -1545,20 +1545,37 @@ async def record_app(app_url: str, repo_context: dict = None,
                          planned_step_index >= len(planned_steps))):
                     beat_completed = True
 
-                # ``seconds`` is a planned on-camera duration, not merely an
-                # action-loop timeout.  Once a successful learned workflow is
-                # visible, hold that meaningful result on screen for the rest
-                # of the beat so script writing and assembly receive the
-                # intended duration.  Extending the final successful segment
-                # also lets its narration explain the visible result instead
-                # of adding a disconnected frozen outro.
+                # ``seconds`` is a requested on-camera duration, not merely
+                # an action-loop timeout. Keep a meaningful visible state on
+                # screen for the rest of every beat so the selected 3/5-minute
+                # target survives interaction drift and reaches assembly.
                 remaining = beat_seconds - (elapsed() - beat_camera_start)
                 session_remaining = session_budget - elapsed()
                 hold_seconds = min(remaining, session_remaining)
-                if (beat_completed and segment_id > beat_start_segment_id and
-                        hold_seconds >= 0.25):
-                    await page.wait_for_timeout(int(hold_seconds * 1000))
-                    segments[-1]["end_time"] = round(elapsed(), 2)
+                if hold_seconds >= 0.25:
+                    if segment_id > beat_start_segment_id:
+                        await page.wait_for_timeout(int(hold_seconds * 1000))
+                        # Narrate the last successful/visible state instead of
+                        # throwing away the remaining planned screen time.
+                        segments[-1]["end_time"] = round(elapsed(), 2)
+                    else:
+                        # A custom canvas or broken control can leave a beat
+                        # without an action segment. Preserve the safe visible
+                        # overview so the script can explain what is on screen
+                        # rather than silently losing this part of the video.
+                        await page.wait_for_timeout(int(hold_seconds * 1000))
+                        overview = await _observe(page)
+                        segment_id += 1
+                        segments.append({
+                            "segment_id": segment_id,
+                            "start_time": round(beat_camera_start, 2),
+                            "end_time": round(elapsed(), 2),
+                            "feature": beat.get("feature", ""),
+                            "talking_point": beat.get("talking_point", ""),
+                            "action": "view",
+                            "reason": "Show the visible product state.",
+                            "observation": overview,
+                        })
 
                 camera_used += elapsed() - beat_camera_start
 

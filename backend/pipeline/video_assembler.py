@@ -1,6 +1,6 @@
 """
 Assembles the final video from segments: splits the full recording into
-per-segment clips, pads each to match its voiceover's duration, merges
+per-segment clips, preserves each planned on-screen duration, merges
 audio+video per segment, then concatenates everything with the title card.
 
 Every ffmpeg call goes through segment_tool.run_subprocess, which enforces a
@@ -19,6 +19,7 @@ card), concatenate through ffmpeg's filter graph, and verify output duration.
 `concat_segments` is shared with the on-demand download endpoint so downloads
 glue the exact same way.
 """
+import math
 import os
 from typing import Optional
 
@@ -40,6 +41,19 @@ OUT_W = 1280
 OUT_H = 720
 OUT_FPS = 30
 OUT_SR = 44100  # audio sample rate
+TITLE_CARD_SECONDS = 3.0
+ASSEMBLY_CONTRACT_VERSION = 3
+# Normal TTS speaking-rate variation is expected. A larger mismatch means a
+# bad narration asset and must not become a silently broken final video.
+VOICE_DURATION_TOLERANCE = 0.25
+
+
+def duration_tolerance(target_duration: float) -> float:
+    """Return the small muxing allowance for a requested final duration."""
+    # Video frame rounding and AAC priming are normally well under a second.
+    # Keep the public result close enough to the selected 3/5-minute option
+    # that an incomplete render is never presented as a full one.
+    return max(1.0, min(3.0, float(target_duration) * 0.01))
 
 # Scale to fit inside the frame, then pad to exact WxH so mismatched source
 # resolutions never letterbox weirdly or shrink the final video.
@@ -50,20 +64,31 @@ _SCALE_PAD = (
 )
 
 
-async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> str:
+async def _merge_segment(video_path: str, audio_path: str, output_path: str,
+                         target_duration: float,
+                         source_audio_duration: float | None = None) -> str:
     """Mux one video clip with its matching voiceover, normalized to spec.
 
-    The video is scaled/padded to the canonical frame and the audio is
-    re-encoded to stereo AAC so every merged segment is byte-compatible for
-    concatenation.
+    The recorded beat duration owns the timeline. Narration that is slightly
+    long or short is tempo-fitted within the accepted tolerance, then padded
+    for codec rounding; it never cuts the screen segment down to its length.
     """
+    tempo_filter = ""
+    if source_audio_duration is not None and source_audio_duration > 0:
+        tempo = source_audio_duration / target_duration
+        if abs(tempo - 1.0) > 0.01:
+            tempo_filter = f",atempo={tempo:.5f}"
     cmd = [
         "ffmpeg", "-i", video_path, "-i", audio_path,
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-vf", _SCALE_PAD,
+        "-filter_complex",
+        f"[0:v]{_SCALE_PAD},setpts=PTS-STARTPTS[v];"
+        f"[1:a]aresample={OUT_SR},aformat=channel_layouts=stereo,"
+        f"asetpts=PTS-STARTPTS{tempo_filter},"
+        f"apad=pad_dur={target_duration:.3f}[a]",
+        "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-ar", str(OUT_SR), "-ac", "2",
-        "-shortest",
+        "-t", f"{target_duration:.3f}",
         output_path, "-y",
     ]
     await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Segment merge")
@@ -73,10 +98,9 @@ async def _merge_segment(video_path: str, audio_path: str, output_path: str) -> 
 async def _merge_silent_segment(video_path: str, output_path: str) -> str:
     """Normalize a clip and attach a full-length silent stereo track.
 
-    Used when a segment has no voiceover (TTS was non-fatal and produced no
-    audio). Every concat input must carry a stereo AAC track or the concat
-    demuxer drops audio for the whole video, so we synthesize silence that
-    matches the clip's own duration.
+    Used only when rebuilding legacy clips. Every concat input must carry a
+    stereo AAC track or the concat demuxer drops audio for the whole video, so
+    this gives an old silent segment a stream that matches its own duration.
     """
     dur = await get_duration(video_path)
     cmd = [
@@ -96,7 +120,7 @@ async def _merge_silent_segment(video_path: str, output_path: str) -> str:
 
 
 async def _render_title_card(title_card_path: str, output_path: str,
-                             duration: float = 3.0) -> str:
+                             duration: float = TITLE_CARD_SECONDS) -> str:
     """Render the title card as a normalized clip WITH a silent audio track.
 
     A missing audio track on this single piece is enough to make the concat
@@ -216,6 +240,7 @@ async def assemble(
     voiced_segments: list[dict],   # from generate_segment_voices, has audio_path
     title_card_path: Optional[str],
     job_id: str,
+    target_duration: Optional[float] = None,
 ) -> dict:
     """
     Returns:
@@ -228,6 +253,8 @@ async def assemble(
     """
     segment_clip_paths = []
     concat_entries = []
+    voiced_segment_count = 0
+    title_duration = 0.0
 
     # Title card as its own 3-second normalized (silent) segment.
     if title_card_path and os.path.exists(title_card_path):
@@ -235,11 +262,31 @@ async def assemble(
         try:
             await _render_title_card(title_card_path, title_clip_path)
             concat_entries.append(title_clip_path)
+            title_duration = TITLE_CARD_SECONDS
         except (RuntimeError, TimeoutError):
             # A failed/hung title card is non-fatal — continue without it.
             pass
 
-    for seg in voiced_segments:
+    # Recording normally reserves three seconds for the title card. If that
+    # optional render is unavailable, preserve the selected duration by
+    # holding the final visible product state for the missing title time.
+    final_visual_extension = 0.0
+    if target_duration is not None and voiced_segments:
+        timed_durations = []
+        for timed_segment in voiced_segments:
+            start = timed_segment.get("start_time")
+            end = timed_segment.get("end_time")
+            if start is None or end is None:
+                timed_durations = []
+                break
+            timed_durations.append(max(0.5, float(end) - float(start)))
+        if timed_durations:
+            final_visual_extension = max(
+                0.0,
+                float(target_duration) - title_duration - sum(timed_durations),
+            )
+
+    for seg_index, seg in enumerate(voiced_segments):
         seg_id = seg["segment_id"]
         start = seg.get("start_time")
         end = seg.get("end_time")
@@ -250,27 +297,44 @@ async def assemble(
 
         if start is not None and end is not None:
             await split_clip(full_video_path, start, end, raw_clip_path)
+            visual_duration = max(0.5, float(end) - float(start))
         else:
             # No timing info — use the full video as a fallback clip
             raw_clip_path = full_video_path
+            visual_duration = await get_duration(raw_clip_path)
+
+        if seg_index == len(voiced_segments) - 1:
+            visual_duration += final_visual_extension
 
         padded_clip_path = f"/tmp/paddedclip_{job_id}_seg{seg_id}.mp4"
         merged_path = f"/tmp/mergedseg_{job_id}_seg{seg_id}.mp4"
 
         if has_audio:
-            # Voiceover drives the segment length so audio and video stay synced.
-            target_duration = await get_duration(audio_path)
-            await fit_video_to_duration(raw_clip_path, target_duration, padded_clip_path)
-            await _merge_segment(padded_clip_path, audio_path, merged_path)
+            # The recorded/planned screen timeline is authoritative. A voice
+            # track must match it closely enough to remain naturally synced.
+            audio_duration = await get_duration(audio_path)
+            min_audio_duration = visual_duration * (1.0 - VOICE_DURATION_TOLERANCE)
+            max_audio_duration = visual_duration * (1.0 + VOICE_DURATION_TOLERANCE)
+            if not min_audio_duration <= audio_duration <= max_audio_duration:
+                raise RuntimeError(
+                    f"Voiceover for segment {seg_id} is {audio_duration:.1f}s, "
+                    f"but its planned screen time is {visual_duration:.1f}s. "
+                    "Refusing to publish a mismatched narration timeline.")
+            await fit_video_to_duration(raw_clip_path, visual_duration, padded_clip_path)
+            await _merge_segment(
+                padded_clip_path, audio_path, merged_path, visual_duration,
+                audio_duration)
+            voiced_segment_count += 1
         else:
-            # No voiceover for this segment (TTS is non-fatal). Keep the segment
-            # at its recorded length (or the clip's own length) and attach a
-            # silent track so the concat step still produces continuous audio.
-            if start is not None and end is not None:
-                target_duration = max(0.5, float(end) - float(start))
-            else:
-                target_duration = await get_duration(raw_clip_path)
-            await fit_video_to_duration(raw_clip_path, target_duration, padded_clip_path)
+            # A fresh pipeline run must never turn a missing voice asset into
+            # a successful silent download. ``target_duration`` is supplied
+            # only by the current generation pipeline; the legacy branch is
+            # kept for old, explicitly rebuilt artifacts.
+            if target_duration is not None:
+                raise RuntimeError(
+                    f"Segment {seg_id} has no validated narration asset. "
+                    "Refusing to publish a silent video.")
+            await fit_video_to_duration(raw_clip_path, visual_duration, padded_clip_path)
             await _merge_silent_segment(padded_clip_path, merged_path)
 
         segment_clip_paths.append({
@@ -283,8 +347,23 @@ async def assemble(
 
     final_video_path = f"/tmp/final_{job_id}.mp4"
     await concat_segments(concat_entries, final_video_path, job_id)
+    actual_duration = await get_duration(final_video_path)
+    if target_duration is not None:
+        if (not math.isfinite(actual_duration) or
+                abs(actual_duration - float(target_duration)) >
+                duration_tolerance(float(target_duration))):
+            raise RuntimeError(
+                f"Final video duration is {actual_duration:.1f}s; requested "
+                f"{float(target_duration):.1f}s. Refusing to publish an "
+                "incomplete demo.")
 
     return {
         "final_video_path": final_video_path,
         "segment_clips": segment_clip_paths,
+        "actual_duration_seconds": round(actual_duration, 2),
+        "voiced_segment_count": voiced_segment_count,
+        "assembly_contract_version": ASSEMBLY_CONTRACT_VERSION,
+        "requested_duration_seconds": (
+            float(target_duration) if target_duration is not None else None
+        ),
     }

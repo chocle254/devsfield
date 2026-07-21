@@ -10,6 +10,7 @@ Endpoints:
 """
 import asyncio
 import json
+import math
 import os
 import uuid
 
@@ -46,6 +47,28 @@ async def ensure_job_loaded(job_id: str):
     await restore_job(job_id, state)
     return await get_job(job_id)
 
+
+def _is_verified_v3_master(result: object) -> bool:
+    """Do not trust a partially deployed or pre-contract v3 manifest."""
+    if not isinstance(result, dict):
+        return False
+    try:
+        requested = float(result["requested_duration_seconds"])
+        actual = float(result["actual_duration_seconds"])
+        voiced_count = int(result["voiced_segment_count"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    segments = result.get("segments")
+    if (not math.isfinite(requested) or not math.isfinite(actual) or
+            abs(actual - requested) > storage._selected_duration_tolerance(requested) or
+            not isinstance(segments, list) or not segments or
+            voiced_count != len(segments)):
+        return False
+    return all(
+        isinstance(segment, dict) and bool(segment.get("voice_key"))
+        for segment in segments
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -62,7 +85,9 @@ async def generate(request: GenerateRequest) -> dict:
     # Required environment variables
     # NOTE: ELEVENLABS_API_KEY removed — voice_generator.py now uses
     # genblaze-gmicloud (GMICloudAudioProvider), which only needs
-    # GMI_CLOUD_API_KEY. No separate ElevenLabs account needed.
+    # GMI_CLOUD_API_KEY. NVIDIA_API_KEY powers the vision fallback used for
+    # visually grounded browser interaction. No separate ElevenLabs account
+    # is needed.
     if not os.environ.get("GITHUB_TOKEN"):
         raise HTTPException(
             status_code=400,
@@ -72,6 +97,11 @@ async def generate(request: GenerateRequest) -> dict:
         raise HTTPException(
             status_code=400,
             detail="Server configuration error: GMI_CLOUD_API_KEY not set",
+        )
+    if not os.environ.get("NVIDIA_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="Server configuration error: NVIDIA_API_KEY not set",
         )
     if not os.environ.get("B2_BUCKET"):
         raise HTTPException(
@@ -211,7 +241,7 @@ async def get_result(job_id: str):
 async def get_download(job_id: str):
     """Return the canonical final MP4, with legacy re-gluing as fallback.
 
-    v2 ``final_video.mp4`` is assembled and duration-verified by the pipeline,
+    v3 ``final_video.mp4`` is assembled and duration/audio-verified by the pipeline,
     so it is the authoritative artifact for new downloads.  Older manifests
     use the repaired segment rebuild once, even if their original master file
     still exists.
@@ -219,18 +249,20 @@ async def get_download(job_id: str):
     result = await storage.load_result_from_b2(job_id)
     if result is not None:
         result = await storage.resolve_result_urls(result)
-        # Pre-v2 masters may already be truncated.  Rebuild those older jobs
-        # from their full per-segment clips with the repaired normalizer.
+        # Only v3 masters were checked against both the selected duration and
+        # real narration. Older jobs may be short/silent, so use the legacy
+        # rebuild path where possible instead of presenting them as verified.
         try:
             assembly_version = int(result.get("assembly_version", 0))
         except (TypeError, ValueError):
             assembly_version = 0
-        if assembly_version >= 2:
+        if (assembly_version >= storage.ASSEMBLY_VERSION and
+                _is_verified_v3_master(result)):
             video_url = result.get("video_url")
             if video_url:
                 return {"job_id": job_id, "video_url": video_url}
 
-    # Legacy fallback for jobs that predate the verified v2 assembly.
+    # Legacy fallback for jobs that predate the verified v3 assembly.
     glued_url = await storage.get_glued_download_url(job_id)
     if glued_url:
         return {"job_id": job_id, "video_url": glued_url}

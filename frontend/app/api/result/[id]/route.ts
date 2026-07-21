@@ -59,12 +59,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const rawSegments: Array<Record<string, unknown>> =
     Array.isArray(data.segments) ? data.segments : []
 
-  // Derive total duration from the last segment's end_time if available,
-  // otherwise fall back to the backend field or a default of 180 s.
+  // The backend probes the glued final MP4, so its verified duration is the
+  // source of truth. Segment timestamps exclude the title card and route-load
+  // gaps, which made the UI under-report a correctly rendered 3/5-minute run.
   const lastSeg = rawSegments[rawSegments.length - 1]
   const durationSec: number =
-    (typeof lastSeg?.end_time === "number" ? lastSeg.end_time : null) ??
-    (typeof data.duration_seconds === "number" ? data.duration_seconds : 180)
+    (typeof data.duration_seconds === "number" ? data.duration_seconds : null) ??
+    (typeof lastSeg?.end_time === "number" ? lastSeg.end_time : 180)
 
   // Narration text — join all segment texts for the scriptPreview card.
   const scriptText: string =

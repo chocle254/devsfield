@@ -20,6 +20,10 @@ PLANNER_MODEL = "deepseek-ai/DeepSeek-V3.2"
 # Keep this aligned with app_browser's camera budget so a requested duration
 # describes the finished video rather than an unexplained shorter maximum.
 RESERVED_SECONDS = 3
+MIN_BEAT_SECONDS = 10
+MAX_BEAT_SECONDS = 60
+MIN_BEATS = 3
+MAX_BEATS = 10
 MAX_INTERACTION_STEPS_PER_BEAT = 5
 SAFE_INTERACTION_ACTIONS = {"click", "type", "select", "toggle", "press", "scroll"}
 UNSAFE_INTERACTION_TERMS = {
@@ -28,6 +32,28 @@ UNSAFE_INTERACTION_TERMS = {
     "transfer", "withdraw", "deploy", "publish", "invite", "share",
     "password", "secret", "token", "api key", "credit card", "cvv",
 }
+
+
+def _minimum_beats_for_duration(usable_seconds: int) -> int:
+    """Return enough beats to make the requested duration feasible.
+
+    A beat intentionally has a ceiling: a very long static shot makes for a
+    poor demo even when the browser can technically hold it.  With a 60 second
+    ceiling, a 177-second recording (the screen portion of a 3-minute video)
+    needs at least three beats and a 297-second recording (5 minutes) needs
+    at least five.  The backend's public 300-second maximum keeps this within
+    ``MAX_BEATS``.
+    """
+    required = (max(0, usable_seconds) + MAX_BEAT_SECONDS - 1) // MAX_BEAT_SECONDS
+    return min(MAX_BEATS, max(MIN_BEATS, required))
+
+
+def _maximum_beats_for_duration(usable_seconds: int) -> int:
+    """Leave the model room to show more learned sections when they exist."""
+    return min(
+        MAX_BEATS,
+        max(_minimum_beats_for_duration(usable_seconds), usable_seconds // 18),
+    )
 
 
 def _display_name(control: dict) -> str:
@@ -119,15 +145,44 @@ def _fallback_plan(context: dict, usable_seconds: int) -> dict:
     """
     routes = context.get("detected_routes") or ["/"]
     catalog = context.get("interaction_catalog") or []
-    beats = []
-    max_beats = min(10, max(3, usable_seconds // 18))
-    per_beat = max(12, usable_seconds // max(1, min(len(routes), max_beats)))
-    for i, route in enumerate(routes[:max_beats]):
+    candidates: list[tuple[str, str]] = []
+    seen_candidates: set[tuple[str, str]] = set()
+
+    # Prefer distinct source-evidenced sections over repeatedly holding one
+    # page.  When a small app has fewer sections than the requested duration
+    # needs, the loop below deliberately cycles the safe candidates; the
+    # browser can then show a real, bounded workflow for each beat instead of
+    # receiving one multi-minute static shot.
+    for route in routes:
         matching_entries = [entry for entry in catalog if entry.get("route") == route]
         sections = [
-            section for entry in matching_entries for section in entry.get("sections", [])
+            str(section).strip()
+            for entry in matching_entries
+            for section in entry.get("sections", [])
+            if str(section).strip()
         ]
-        feature = sections[0] if sections else f"Page {route}"
+        features = sections or [f"Page {route}"]
+        for feature in features:
+            candidate = (route, feature)
+            if candidate not in seen_candidates:
+                candidates.append(candidate)
+                seen_candidates.add(candidate)
+
+    if not candidates:
+        candidates = [("/", "App overview")]
+
+    beats = []
+    min_beats = _minimum_beats_for_duration(usable_seconds)
+    max_beats = _maximum_beats_for_duration(usable_seconds)
+    # Use more different learned sections when the repository gives us them,
+    # but always reserve enough beats for the requested time budget.
+    target_beat_count = min(max_beats, max(min_beats, len(candidates)))
+    per_beat = max(
+        MIN_BEAT_SECONDS,
+        min(MAX_BEAT_SECONDS, usable_seconds // max(1, target_beat_count)),
+    )
+    for i in range(target_beat_count):
+        route, feature = candidates[i % len(candidates)]
         steps = _catalog_steps(catalog, route)
         beats.append({
             "priority": i + 1,
@@ -139,48 +194,96 @@ def _fallback_plan(context: dict, usable_seconds: int) -> dict:
             "interaction_steps": steps,
         })
     return {
-        "beats": beats,
+        "beats": _use_full_time_budget(beats, usable_seconds),
         "needs_login": bool(context.get("has_auth")),
         "app_summary": context.get("description") or context.get("repo_name", ""),
     }
 
 
 def _use_full_time_budget(beats: list[dict], usable_seconds: int) -> list[dict]:
-    """Expand safe planned beats to use the requested recording budget.
+    """Return a bounded beat plan that exactly occupies the screen budget.
 
-    The model may return a valid but very short shot list.  A selected video
-    length is a target, so distribute unused time across existing beats (up to
-    a minute each) rather than silently delivering a much shorter demo.  The
-    browser will keep the post-interaction result visible during that time,
-    giving narration real on-screen material to explain.
+    The planning model may return only three short beats for a five-minute
+    selection.  Simply extending those beats to their one-minute ceiling used
+    to leave the final two minutes unallocated.  Add safe copies of existing
+    source-grounded beats until there is enough capacity, then distribute time
+    evenly.  The copied steps have already passed the interaction safety
+    normalizer; no new controls, routes, or actions are invented here.
     """
     if not beats:
         return beats
 
-    total = sum(int(beat.get("seconds", 0)) for beat in beats)
+    # This helper is used by both the model and deterministic fallback paths,
+    # so normalize durations defensively even if a caller skipped validation.
+    allocated = list(beats)
+    for beat in allocated:
+        try:
+            seconds = int(beat.get("seconds", MIN_BEAT_SECONDS))
+        except (TypeError, ValueError):
+            seconds = MIN_BEAT_SECONDS
+        beat["seconds"] = max(MIN_BEAT_SECONDS, min(MAX_BEAT_SECONDS, seconds))
+
+    # A 5-minute selection has 297 seconds of screen time after the title
+    # card, which requires at least five <=60-second beats.  Clone only
+    # already-sanitized content when the model did not provide that capacity.
+    source_beats = list(allocated)
+    required_count = _minimum_beats_for_duration(usable_seconds)
+    clone_index = 0
+    while len(allocated) < required_count:
+        source = source_beats[clone_index % len(source_beats)]
+        clone = {
+            **source,
+            "priority": len(allocated) + 1,
+            "interaction_steps": [
+                dict(step) for step in source.get("interaction_steps", [])
+                if isinstance(step, dict)
+            ],
+        }
+        allocated.append(clone)
+        clone_index += 1
+
+    total = sum(int(beat["seconds"]) for beat in allocated)
+
+    # A model can also over-allocate.  Keep at least the meaningful minimum
+    # per beat, trimming lowest-priority beats first so the strongest early
+    # material retains its requested time.
+    excess = max(0, total - usable_seconds)
+    for beat in reversed(allocated):
+        if not excess:
+            break
+        reducible = max(0, int(beat["seconds"]) - MIN_BEAT_SECONDS)
+        reduction = min(reducible, excess)
+        beat["seconds"] = int(beat["seconds"]) - reduction
+        excess -= reduction
+
+    # Use every available second, sharing additions across beats instead of
+    # turning only the first high-priority beat into a one-minute static shot.
+    total = sum(int(beat["seconds"]) for beat in allocated)
     remaining = max(0, usable_seconds - total)
     while remaining:
         grew = False
-        for beat in beats:
-            current = int(beat.get("seconds", 0))
-            room = max(0, 60 - current)
-            if not room:
-                continue
-            addition = min(room, remaining)
-            beat["seconds"] = current + addition
-            remaining -= addition
-            grew = True
-            if not remaining:
+        for beat in allocated:
+            if remaining <= 0:
                 break
+            current = int(beat["seconds"])
+            if current >= MAX_BEAT_SECONDS:
+                continue
+            beat["seconds"] = current + 1
+            remaining -= 1
+            grew = True
         if not grew:
+            # ``required_count`` above guarantees capacity for supported
+            # request sizes.  Retain this guard for future callers with a
+            # larger-than-supported duration instead of looping forever.
             break
-    return beats
+    return allocated
 
 
 def _fallback_with_full_time(context: dict, usable_seconds: int) -> dict:
     fallback = _fallback_plan(context, usable_seconds)
-    fallback["beats"] = _use_full_time_budget(
-        fallback["beats"], usable_seconds)
+    # _fallback_plan already allocates exactly, but keep this idempotent call
+    # as a guard if its implementation changes independently later.
+    fallback["beats"] = _use_full_time_budget(fallback["beats"], usable_seconds)
     return fallback
 
 
@@ -202,6 +305,8 @@ async def plan_demo(context: dict, video_length: int,
         }
     """
     usable_seconds = max(30, video_length - RESERVED_SECONDS)
+    minimum_beats = _minimum_beats_for_duration(usable_seconds)
+    maximum_beats = _maximum_beats_for_duration(usable_seconds)
 
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     if not gmi_api_key:
@@ -245,12 +350,18 @@ Constraints:
  - Total screen time available: {usable_seconds} seconds. The sum of all beat
   "seconds" MUST NOT exceed {usable_seconds} and should use nearly all of it
   (within three seconds) so the rendered demo reaches the selected duration.
-- 3 to 6 beats. Priority 1 = the single most impressive feature — the one
-  thing a viewer must see. Order beats by priority (most important first),
-  because low-priority beats get dropped if pages load slowly.
-- When the repository contains more distinct learned sections, you may use up
-  to {min(10, max(3, usable_seconds // 18))} beats to cover them. This
-  supersedes the three-to-six guideline above; the time budget remains hard.
+- Use BETWEEN {minimum_beats} AND {maximum_beats} beats. This lower bound is
+  required to make the selected duration feel like a demo rather than one
+  long static shot. For example, a five-minute request needs at least five
+  beats because no individual beat may exceed {MAX_BEAT_SECONDS} seconds.
+  Priority 1 = the single most impressive feature — the one thing a viewer
+  must see. Order beats by priority (most important first), because
+  low-priority beats get dropped if pages load slowly.
+- Keep every beat between {MIN_BEAT_SECONDS} and {MAX_BEAT_SECONDS} seconds.
+  Prefer distinct source-evidenced routes and in-page sections. If the app has
+  only a few routes, divide a meaningful learned workflow into successive
+  visible states (for example, input then result) rather than padding a static
+  page or inventing controls.
 - Cover in-page sections (tabs, accordions, forms) as well as distinct routes
   whenever they are evidenced in the source-derived catalog.
 - Beat 1 should establish what the app is (usually the landing/home page).
@@ -337,7 +448,7 @@ Return ONLY valid JSON:
 
         allowed_routes = set(context.get("detected_routes") or ["/"])
         catalog = context.get("interaction_catalog") or []
-        max_beats = min(10, max(3, usable_seconds // 18))
+        max_beats = maximum_beats
         beats.sort(key=priority)
         total = 0
         kept = []
@@ -346,12 +457,15 @@ Return ONLY valid JSON:
             if route not in allowed_routes:
                 route = "/"
             try:
-                seconds = max(10, min(60, int(beat.get("seconds", 20))))
+                seconds = max(
+                    MIN_BEAT_SECONDS,
+                    min(MAX_BEAT_SECONDS, int(beat.get("seconds", 20))),
+                )
             except (TypeError, ValueError):
                 seconds = 20
             if total + seconds > usable_seconds:
                 remaining = usable_seconds - total
-                if remaining >= 10:
+                if remaining >= MIN_BEAT_SECONDS:
                     seconds = remaining
                 else:
                     break

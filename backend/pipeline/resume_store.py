@@ -30,6 +30,7 @@ are never touched here.
 """
 import asyncio
 import json
+import math
 import os
 from typing import Callable, Optional
 
@@ -63,6 +64,12 @@ _CONTENT_TYPES = {
     ".jpeg": "image/jpeg",
     ".wav": "audio/wav",
 }
+
+# A resumable assembly is only trustworthy when it was produced after the
+# duration/narration contract was introduced. Older checkpoints may contain a
+# short master or segments without voice files, so they must resume from the
+# earliest safe generation step instead of being re-uploaded as a new result.
+_ASSEMBLY_CONTRACT_VERSION = 3
 
 
 def _content_type(path: str) -> str:
@@ -151,6 +158,42 @@ def _files_for_checkpoint(key: str, checkpoints: dict) -> list[str]:
     return paths
 
 
+def _has_complete_voice_checkpoint(checkpoints: dict) -> bool:
+    """True only when every saved narration segment still has a local asset."""
+    segments = checkpoints.get("voiced_segments")
+    if not isinstance(segments, list) or not segments:
+        return False
+    return all(
+        isinstance(segment, dict)
+        and isinstance(segment.get("audio_path"), str)
+        and bool(segment["audio_path"])
+        and os.path.isfile(segment["audio_path"])
+        for segment in segments
+    )
+
+
+def _has_verified_assembly_checkpoint(checkpoints: dict) -> bool:
+    """Reject pre-v3 or incomplete masters during a retry."""
+    assembly = checkpoints.get("assembly")
+    if not isinstance(assembly, dict):
+        return False
+    if assembly.get("assembly_contract_version") != _ASSEMBLY_CONTRACT_VERSION:
+        return False
+    clips = assembly.get("segment_clips")
+    try:
+        actual_duration = float(assembly["actual_duration_seconds"])
+        voiced_count = int(assembly["voiced_segment_count"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        isinstance(clips, list)
+        and bool(clips)
+        and math.isfinite(actual_duration)
+        and actual_duration > 0
+        and voiced_count == len(clips)
+    )
+
+
 def validate_checkpoints(steps_completed: list, checkpoints: dict) -> tuple[list, dict]:
     """Trim a run back to its last fully-intact step.
 
@@ -167,6 +210,10 @@ def validate_checkpoints(steps_completed: list, checkpoints: dict) -> tuple[list
         if step not in completed:
             break
         if not all(k in checkpoints for k in keys):
+            break
+        if step == "voice_generator" and not _has_complete_voice_checkpoint(checkpoints):
+            break
+        if step == "video_assembler" and not _has_verified_assembly_checkpoint(checkpoints):
             break
         files_ok = True
         for k in keys:

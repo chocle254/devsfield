@@ -1,4 +1,5 @@
 import os
+import math
 import shutil
 from typing import Optional
 
@@ -30,6 +31,31 @@ async def _advance(job_id: str, step: str) -> None:
         await resume_store.persist(job_id)
     except Exception:
         pass
+
+
+def _can_reuse_assembly(assembly: object, requested_duration: float,
+                        voiced_segments: list[dict]) -> bool:
+    """Only reuse an assembly made by the current audio/duration contract."""
+    if not isinstance(assembly, dict) or not voiced_segments:
+        return False
+    if assembly.get("assembly_contract_version") != video_assembler.ASSEMBLY_CONTRACT_VERSION:
+        return False
+    try:
+        checkpoint_target = float(assembly["requested_duration_seconds"])
+        actual_duration = float(assembly["actual_duration_seconds"])
+        voiced_count = int(assembly["voiced_segment_count"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    clips = assembly.get("segment_clips")
+    if (not math.isfinite(checkpoint_target) or not math.isfinite(actual_duration) or
+            abs(checkpoint_target - float(requested_duration)) > 0.01 or
+            abs(actual_duration - float(requested_duration)) >
+            video_assembler.duration_tolerance(float(requested_duration)) or
+            not isinstance(clips, list) or len(clips) != len(voiced_segments) or
+            voiced_count != len(voiced_segments)):
+        return False
+    return True
 
 
 async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
@@ -124,19 +150,33 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
                 script_segments, job_id, tone=request.tone,
                 voice=getattr(request, "voice", None))
             for seg in voiced_segments:
-                # Voice is non-fatal: a segment may have no audio_path.
-                if seg.get("audio_path"):
-                    await add_tmp_file(job_id, seg["audio_path"])
+                # Voice generation validates an asset for every segment before
+                # assembly; retain each one for a resumable, audible render.
+                await add_tmp_file(job_id, seg["audio_path"])
             await save_checkpoint(job_id, "voiced_segments", voiced_segments)
             await _advance(job_id, "voice_generator")
 
-        # 6. Composite the final video
-        if "video_assembler" in completed and "assembly" in ckpt:
+        # 6. Composite the final video. A checkpoint from before the v3
+        # duration/audio contract is never safe to upload as a new master.
+        reusable_assembly = (
+            "video_assembler" in completed and
+            _can_reuse_assembly(
+                ckpt.get("assembly"), request.video_length, voiced_segments)
+        )
+        if reusable_assembly:
             assembly = ckpt["assembly"]
         else:
+            if "video_assembler" in completed:
+                # Keep durable retry state coherent and avoid appending a
+                # duplicate completed-step entry after rebuilding.
+                kept_steps = [step for step in kept_steps if step != "video_assembler"]
+                ckpt.pop("assembly", None)
+                completed.discard("video_assembler")
+                await set_resume_state(job_id, kept_steps, ckpt)
             await set_step(job_id, "video_assembler", "Compositing final video...")
             assembly = await video_assembler.assemble(
-                recording["video_path"], voiced_segments, title_card_path, job_id)
+                recording["video_path"], voiced_segments, title_card_path, job_id,
+                target_duration=request.video_length)
             await add_tmp_file(job_id, assembly["final_video_path"])
             for clip in assembly["segment_clips"]:
                 await add_tmp_file(job_id, clip["clip_path"])
@@ -148,7 +188,9 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
         await set_step(job_id, "storage", "Uploading to Backblaze B2...")
         result = await storage.upload_all(
             job_id, assembly["final_video_path"], assembly["segment_clips"],
-            request=request, duration_seconds=getattr(request, "video_length", None))
+            request=request, duration_seconds=getattr(request, "video_length", None),
+            actual_duration_seconds=assembly.get("actual_duration_seconds"),
+            voiced_segment_count=assembly.get("voiced_segment_count"))
         await complete_step(job_id, "storage")
 
         await complete_job(job_id, result)

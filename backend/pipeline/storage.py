@@ -5,6 +5,7 @@ Backblaze B2, plus a segment manifest that makes future editing possible.
 import asyncio
 import hashlib
 import json
+import math
 import os
 from datetime import datetime
 
@@ -45,6 +46,41 @@ def make_b2_backend() -> S3StorageBackend:
 # call re-signs, the effective lifetime is unbounded for anyone actively using
 # the app or a share link.
 _PRESIGN_TTL_SEC = 7 * 24 * 3600
+ASSEMBLY_VERSION = 3
+
+
+def _selected_duration_tolerance(target_duration: float) -> float:
+    """Match the small allowance used by the final video assembler."""
+    return max(1.0, min(3.0, float(target_duration) * 0.01))
+
+
+def _validate_verified_upload(segment_clips: list[dict],
+                              requested_duration: float | None,
+                              actual_duration: float | None,
+                              voiced_segment_count: int | None) -> None:
+    """Stop an incomplete or silent assembly before any final asset is stored."""
+    if requested_duration is None:
+        raise ValueError("A selected video duration is required before upload")
+    try:
+        requested = float(requested_duration)
+        actual = float(actual_duration)
+        voiced_count = int(voiced_segment_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Final video is missing verified duration or narration metadata") from exc
+
+    if (not math.isfinite(requested) or requested <= 0 or
+            not math.isfinite(actual) or
+            abs(actual - requested) > _selected_duration_tolerance(requested)):
+        raise ValueError(
+            f"Refusing to upload an incomplete final video "
+            f"({actual:.1f}s for a {requested:.1f}s selection)")
+    if not segment_clips or voiced_count != len(segment_clips):
+        raise ValueError("Refusing to upload a final video with missing narration")
+    for segment in segment_clips:
+        voice_path = segment.get("voice_path") if isinstance(segment, dict) else None
+        if not isinstance(voice_path, str) or not os.path.isfile(voice_path):
+            raise ValueError("Refusing to upload a segment without narration")
 
 
 def _url_for(backend, key: str) -> str:
@@ -116,7 +152,14 @@ def _repo_name(github_url: str) -> str:
 
 async def upload_all(job_id: str, final_video_path: str,
                       segment_clips: list[dict],
-                      request=None, duration_seconds: int = None) -> dict:
+                      request=None, duration_seconds: float | None = None,
+                      actual_duration_seconds: float | None = None,
+                      voiced_segment_count: int | None = None) -> dict:
+    if duration_seconds is None and request is not None:
+        duration_seconds = getattr(request, "video_length", None)
+    _validate_verified_upload(
+        segment_clips, duration_seconds, actual_duration_seconds,
+        voiced_segment_count)
     backend = make_b2_backend()
 
     # Upload final video
@@ -140,9 +183,8 @@ async def upload_all(job_id: str, final_video_path: str,
             backend.put, clip_key, clip_data, content_type="video/mp4")
         clip_url = await asyncio.to_thread(_url_for, backend, clip_key)
 
-        # TTS is intentionally non-fatal.  Keep a successfully rendered
-        # silent segment downloadable instead of failing the entire upload
-        # because it has no individual voice file.
+        # Every current assembly has already been verified above to include a
+        # real narration asset for this segment.
         voice_key = None
         voice_url = None
         voice_path = seg.get("voice_path")
@@ -175,27 +217,32 @@ async def upload_all(job_id: str, final_video_path: str,
     github_url = getattr(request, "github_url", "") if request else ""
     app_url = getattr(request, "app_url", "") if request else ""
     tone = getattr(request, "tone", None) if request else None
-    if duration_seconds is None and request is not None:
-        duration_seconds = getattr(request, "video_length", None)
-
     # Provenance manifest
     manifest = {
         "job_id": job_id,
-        # v2 uses normalized streams plus filter-graph concat with a duration
-        # check.  /download uses this to distinguish it from legacy masters
-        # that may have been produced by the truncating glue path.
-        "assembly_version": 2,
+        # v3 is duration-validated against the user's requested runtime and
+        # requires real narration before a master is published.
+        "assembly_version": ASSEMBLY_VERSION,
         "video_key": video_key,
         "segments_key": segments_key,
         "github_url": github_url,
         "app_url": app_url,
         "repo_name": _repo_name(github_url),
         "tone": tone,
-        "duration_seconds": duration_seconds,
+        "requested_duration_seconds": duration_seconds,
+        "actual_duration_seconds": actual_duration_seconds,
+        "duration_seconds": (
+            actual_duration_seconds
+            if actual_duration_seconds is not None else duration_seconds
+        ),
+        "voiced_segment_count": voiced_segment_count,
         "sha256": _sha256_file(final_video_path),
         "models_used": {
             "llm": "deepseek-ai/DeepSeek-V3.2 via GMI Cloud",
-            "navigation": "deepseek-ai/DeepSeek-V3.2 via GMI Cloud",
+            "navigation": (
+                "DeepSeek-V3.2 via GMI Cloud with Qwen3.5 vision fallback "
+                "via NVIDIA"
+            ),
             "tts": "minimax-tts-speech-2.6-turbo via GMI Cloud (Genblaze)",
             "image": "seedream-5.0-lite via GMI Cloud (Genblaze)",
             "compositor": "FFmpeg",
@@ -227,6 +274,9 @@ async def upload_all(job_id: str, final_video_path: str,
         "repo_name": manifest["repo_name"],
         "tone": manifest["tone"],
         "duration_seconds": manifest["duration_seconds"],
+        "requested_duration_seconds": manifest["requested_duration_seconds"],
+        "actual_duration_seconds": manifest["actual_duration_seconds"],
+        "voiced_segment_count": manifest["voiced_segment_count"],
         "sha256": manifest["sha256"],
         "models_used": manifest["models_used"],
         "generated_at": manifest["generated_at"],
@@ -255,6 +305,9 @@ def _result_from_manifest(manifest: dict, segments: list = None) -> dict:
         "repo_name": manifest.get("repo_name", ""),
         "tone": manifest.get("tone"),
         "duration_seconds": manifest.get("duration_seconds"),
+        "requested_duration_seconds": manifest.get("requested_duration_seconds"),
+        "actual_duration_seconds": manifest.get("actual_duration_seconds"),
+        "voiced_segment_count": manifest.get("voiced_segment_count"),
         "sha256": manifest.get("sha256"),
         "models_used": manifest.get("models_used"),
         "generated_at": manifest.get("generated_at"),
@@ -358,7 +411,7 @@ async def get_glued_download_url(job_id: str) -> str | None:
 
     New jobs serve their pipeline-produced ``final_video.mp4`` directly.  For
     older jobs, rebuild one continuous MP4 from the per-segment clips and
-    cache it as ``final_glued_v2.mp4``.
+    cache it as ``final_glued_v3.mp4``.
 
     Returns a fresh, browser-loadable URL, or None if the job has no segments
     to glue (in which case callers fall back to the original video).
@@ -372,7 +425,7 @@ async def get_glued_download_url(job_id: str) -> str | None:
         # Keep this cache versioned.  Earlier download normalisation could
         # produce a truncated glued file, so reusing the old object would make
         # the fix appear ineffective for an existing job.
-        glued_key = f"jobs/{job_id}/final_glued_v2.mp4"
+        glued_key = f"jobs/{job_id}/final_glued_v3.mp4"
         try:
             await asyncio.to_thread(backend.get, glued_key)
             return await asyncio.to_thread(_url_for, backend, glued_key)

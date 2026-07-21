@@ -53,5 +53,7 @@ class JobResult(BaseModel):
     tone: Optional[str] = None              # library metadata
     sha256: Optional[str] = None
     models_used: Optional[dict] = None
-    duration_seconds: Optional[int] = None
+    # Verified final MP4 duration can include frame/AAC rounding, so preserve
+    # it as a float instead of rejecting a successful result such as 180.03.
+    duration_seconds: Optional[float] = None
     generated_at: Optional[str] = None

@@ -59,7 +59,13 @@ def _target_words(segment: dict) -> int:
     if start is None or end is None:
         return 20
     duration = max(2.0, end - start)
-    return max(8, min(45, round(duration * WORDS_PER_SECOND)))
+    # Segments are deliberately held on their successful on-screen result so
+    # a 45- or 60-second beat has enough time for a real explanation.  The
+    # former 45-word ceiling made every long beat receive only about 19
+    # seconds of speech, which left most of a requested three/five-minute
+    # video silent.  Keep the lower bound for tiny clips, but let the budget
+    # scale with the measured recording duration.
+    return max(8, round(duration * WORDS_PER_SECOND))
 
 
 def _fallback(segments: list[dict], repo_name: str) -> list[dict]:
