@@ -51,8 +51,20 @@ logger = logging.getLogger(__name__)
 
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3.2"
-NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-VISION_NAV_MODEL = "qwen/qwen3.6-35b-a3b"
+
+# Vision-grounded navigation now runs on the same GMI Cloud account/endpoint
+# as everything else (single GMI_CLOUD_API_KEY, no separate NVIDIA account or
+# "Public API Endpoints" permission to babysit). GMI proxies major-lab
+# multimodal models directly, not just open-weight ones, so we use those
+# rather than a smaller open-weight VLM: this call has to visually ground a
+# screenshot to one exact control id and return strict JSON, where accuracy
+# matters far more than shaving latency. Claude Sonnet is tried first for its
+# instruction-following/JSON reliability; Gemini Flash-Lite is a same-account
+# fallback if Sonnet errors or isn't enabled for this key.
+VISION_NAV_CANDIDATES = (
+    "anthropic/claude-sonnet-4.6",
+    "google/gemini-3.1-flash-lite",
+)
 
 # How long we're willing to wait for a page before moving on (slow networks)
 GOTO_TIMEOUT_MS = 25000
@@ -68,8 +80,8 @@ SENSITIVE_FIELD_SELECTOR = (
     "input[autocomplete='current-password'], "
     "input[autocomplete='new-password']"
 )
-# NVIDIA accepts inline images only below its documented 180 KB threshold.
-# Keep the raw JPEG smaller so its base64 data URL remains safely inline.
+# Keep the raw JPEG small so its base64 data URL stays a safe, comfortably
+# inline chat-completions payload across GMI's proxied model backends.
 MAX_INLINE_REASONING_FRAME_BYTES = 130 * 1024
 
 # The model is allowed to demonstrate product workflows, not mutate account,
@@ -174,7 +186,7 @@ async def _capture_reasoning_frame(page) -> str | None:
 
     This intentionally stays in memory: it is model input only, never a
     snapshot asset.  It uses the same sensitive-field mask as reel snapshots
-    and refuses images too large for NVIDIA's inline image limit.
+    and refuses images too large for an inline chat-completions image.
     """
     last_size = None
     try:
@@ -1275,12 +1287,10 @@ async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
         return grounded
 
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
-    nvidia_api_key = os.environ.get("NVIDIA_API_KEY")
-    if not gmi_api_key or not nvidia_api_key or page is None:
+    if not gmi_api_key or page is None:
         missing = [
             name for name, val in (
                 ("GMI_CLOUD_API_KEY", gmi_api_key),
-                ("NVIDIA_API_KEY", nvidia_api_key),
                 ("page", page),
             ) if not val
         ]
@@ -1344,55 +1354,72 @@ Return ONLY valid JSON:
   "beat_complete": true | false
 }}"""
 
-    try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            response = await client.post(
-                NVIDIA_CHAT_URL,
-                headers={"Authorization": f"Bearer {nvidia_api_key}",
-                         "Accept": "application/json",
-                         "Content-Type": "application/json"},
-                json={
-                    "model": VISION_NAV_MODEL,
-                    "messages": [
-                        {"role": "system", "content":
-                         "You are an expert product-demo browser operator. "
-                         "Respond only with valid JSON and use only supplied control ids."},
-                        {"role": "user", "content": [
-                            {"type": "text", "text": user_prompt},
-                            {"type": "image_url", "image_url": {
-                                "url": f"data:image/jpeg;base64,{reasoning_frame}",
-                            }},
-                        ]},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 500,
-                },
-            )
+    system_prompt = ("You are an expert product-demo browser operator. "
+                     "Respond only with valid JSON and use only supplied control ids.")
+    for attempt, model in enumerate(VISION_NAV_CANDIDATES):
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                response = await client.post(
+                    GMI_CHAT_URL,
+                    headers={"Authorization": f"Bearer {gmi_api_key}",
+                             "Accept": "application/json",
+                             "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": [
+                                {"type": "text", "text": user_prompt},
+                                {"type": "image_url", "image_url": {
+                                    "url": f"data:image/jpeg;base64,{reasoning_frame}",
+                                }},
+                            ]},
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 500,
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "[nav] vision navigation model %r call failed (%s)%s.",
+                model, exc,
+                "; trying next candidate" if attempt + 1 < len(VISION_NAV_CANDIDATES)
+                else "; using local heuristic action")
+            continue
+
         if response.status_code == 410:
             logger.error(
                 "[nav] vision navigation model %r has been deprecated by "
-                "the provider (HTTP 410: %s) — update VISION_NAV_MODEL to "
-                "a current model; using local heuristic action until fixed.",
-                VISION_NAV_MODEL, response.text[:300])
-            return fallback
+                "the provider (HTTP 410: %s)%s.", model, response.text[:300],
+                "; trying next candidate" if attempt + 1 < len(VISION_NAV_CANDIDATES)
+                else "; using local heuristic action — update VISION_NAV_CANDIDATES")
+            continue
         if response.status_code != 200:
             logger.warning(
-                "[nav] vision navigation model HTTP %d: %s; using local "
-                "heuristic action.", response.status_code, response.text[:300])
-            return fallback
-        content = response.json()["choices"][0]["message"]["content"].strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        return _normalise_live_decision(json.loads(content.strip()), controls, fallback, planned_step)
-    except Exception as exc:
-        logger.warning(
-            "[nav] vision navigation model call failed (%s); using local "
-            "heuristic action.", exc)
-        return fallback
+                "[nav] vision navigation model %r HTTP %d: %s%s.", model,
+                response.status_code, response.text[:300],
+                "; trying next candidate" if attempt + 1 < len(VISION_NAV_CANDIDATES)
+                else "; using local heuristic action")
+            continue
+
+        try:
+            content = response.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            return _normalise_live_decision(json.loads(content.strip()), controls, fallback, planned_step)
+        except Exception as exc:
+            logger.warning(
+                "[nav] vision navigation model %r returned unusable output (%s)%s.",
+                model, exc,
+                "; trying next candidate" if attempt + 1 < len(VISION_NAV_CANDIDATES)
+                else "; using local heuristic action")
+            continue
+
+    return fallback
 
 
 async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
