@@ -1,8 +1,8 @@
 """
 Generates one voiceover clip per script segment using genblaze-gmicloud
-(GMICloudAudioProvider). This uses the SAME GMI_CLOUD_API_KEY the rest of the
-pipeline already relies on — no separate ElevenLabs account is required, which
-also avoids ElevenLabs' free-tier block on cloud/data-center IPs.
+(GMICloudAudioProvider), defaulting to MiniMax's minimax-tts-speech-01-turbo
+model. This uses the SAME GMI_CLOUD_API_KEY the rest of the pipeline already
+relies on — no separate ElevenLabs account/tokens are required.
 
 Voice is required for every segment. A generated asset is only accepted after
 it has been materialized, checked to be non-empty, and successfully probed by
@@ -85,17 +85,21 @@ def _remove_incomplete_asset(path: str) -> None:
 
 # Candidate (model, {gender: voice_id}) combos, ordered by preference. We try
 # them in order on the first segment and lock onto the first one that actually
-# works on this account, then reuse it for the rest of the segments. All voice
-# ids come from genblaze-gmicloud's curated catalog (models/voices.py).
+# works on this account, then reuse it for the rest of the segments.
 #
-# ElevenLabs-via-GMI is last on purpose: it routes through GMI's ElevenLabs
-# proxy, which can hit the same upstream issues as the direct ElevenLabs API.
+# minimax-tts-speech-01-turbo is first because that's the model this account
+# is billed for (GMI_CLOUD_API_KEY only — no separate ElevenLabs account).
+# MiniMax's preset voice ids (e.g. "presenter_female", "male-qn-qingse") are
+# shared across the whole speech-0x/2.x family, so the same ids that work on
+# minimax-tts-speech-2.6-turbo work here too. 2.6-turbo and inworld remain as
+# same-account GMI fallbacks if speech-01-turbo ever errors; ElevenLabs is
+# intentionally not in this list since there are no ElevenLabs tokens.
 _CANDIDATES: list[tuple[str, dict[str, str]]] = [
+    ("minimax-tts-speech-01-turbo", {"female": "presenter_female",
+                                     "male": "male-qn-qingse"}),
     ("minimax-tts-speech-2.6-turbo", {"female": "presenter_female",
-                                      "male": "presenter_female"}),
+                                      "male": "male-qn-qingse"}),
     ("inworld-tts-1.5-mini", {"female": "ashley", "male": "ronald"}),
-    ("elevenlabs-tts-v3", {"female": "EXAVITQu4vr4xnSDxMaL",   # Sarah
-                           "male": "pNInz6obpgDQGcFmaJgB"}),    # Adam
 ]
 
 # Map the UI "tone" (and a few explicit voice hints) to a gender preference so
@@ -106,9 +110,9 @@ _MALE_TONES = {"pitch", "pitch_demo"}
 def _gender_for(tone: str, voice: str | None) -> str:
     if voice:
         v = voice.strip().lower()
-        if v in ("male", "man", "adam", "george", "antoni", "ronald"):
+        if v in ("male", "man", "ronald", "male-qn-qingse", "male-qn-jingying"):
             return "male"
-        if v in ("female", "woman", "sarah", "rachel", "ashley"):
+        if v in ("female", "woman", "ashley", "presenter_female", "female-shaonv"):
             return "female"
     return "male" if (tone or "").lower() in _MALE_TONES else "female"
 
