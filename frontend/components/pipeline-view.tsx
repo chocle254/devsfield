@@ -78,7 +78,18 @@ export function PipelineView({ id }: { id: string }) {
     const connect = () => {
       if (stopped) return
       es?.close()
-      es = new EventSource(`/api/stream/${id}`)
+      // Connect straight to the Railway backend instead of proxying through a
+      // Vercel serverless function. A run-generation stream stays open for as
+      // long as the job takes (often well past 5 minutes), and a proxying
+      // function gets killed by Vercel's execution-time limit regardless of
+      // response streaming — see /api/stream removal. The backend already
+      // sends permissive CORS headers, so this connects directly.
+      const backendUrl = process.env.NEXT_PUBLIC_API_URL
+      if (!backendUrl) {
+        console.error("NEXT_PUBLIC_API_URL is not set; cannot stream job progress.")
+        return
+      }
+      es = new EventSource(`${backendUrl}/stream/${id}`)
 
       es.onmessage = (e) => {
         const raw = JSON.parse(e.data)
