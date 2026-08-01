@@ -237,6 +237,14 @@ def _control_is_safe(control: dict) -> bool:
         return False
     if control.get("role") == "link" and not control.get("internal_link"):
         return False
+    # A link that opens in a new tab can never change the recorded page's
+    # own state — clicking it always looks identical to a no-op click, even
+    # though it "worked" from the site's point of view. That produced a
+    # deterministic false "stuck" on every attempt (same control every
+    # retry) rather than a real interaction failure, so it's excluded here
+    # rather than being offered to the model as a safe choice.
+    if control.get("role") == "link" and str(control.get("link_target") or "").lower() == "_blank":
+        return False
     return bool(control.get("name") or control.get("label") or control.get("placeholder"))
 
 
@@ -320,7 +328,7 @@ async def _discover_live_controls(page) -> list[dict]:
                   test_id: el.getAttribute('data-testid') || el.getAttribute('data-test') || '',
                   element_id: el.getAttribute('id') || '',
                   dom_name: el.getAttribute('name') || '',
-                  href, options, internal_link: internalLink,
+                  href, options, internal_link: internalLink, link_target: linkTarget,
                   disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
                 });
                 if (result.length >= max) break;
@@ -1266,6 +1274,7 @@ async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
         None,
     )
     before = await _interaction_state(page)
+    popup_task: asyncio.Future | None = None
 
     try:
         if action == "scroll":
@@ -1320,12 +1329,36 @@ async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
             await locator.press(key, timeout=ACTION_TIMEOUT_MS)
             succeeded = True
         elif action == "click" or action == "toggle":
+            # Registered before the click so a JS-driven window.open() isn't
+            # missed by a race; checked further down after the settle wait
+            # that already happens for every action, so this adds no extra
+            # latency to the beat's time budget.
+            popup_task = asyncio.ensure_future(
+                page.context.wait_for_event("page", timeout=INTERACTION_SETTLE_MS)
+            )
             await locator.click(timeout=ACTION_TIMEOUT_MS)
             succeeded = True
         else:
             return {"succeeded": False, "effect": "unsupported-action", "state": before}
 
         await page.wait_for_timeout(INTERACTION_SETTLE_MS)
+        if popup_task is not None:
+            if popup_task.done():
+                try:
+                    new_page = popup_task.result()
+                except Exception:
+                    new_page = None
+                if new_page is not None:
+                    try:
+                        await new_page.close()
+                    except Exception:
+                        pass
+                    # The site did what the control promised — just not on
+                    # the page we record. Don't let the state-comparison
+                    # below penalize a click that correctly opened a tab.
+                    succeeded = True
+            else:
+                popup_task.cancel()
         after = await _interaction_state(page)
         # A click that throws no exception but leaves the app unchanged is not
         # a successful demo interaction.  This closes the old no-op loophole.
