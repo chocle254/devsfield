@@ -103,6 +103,16 @@ def _is_transient_gmi_error(status_code: int, body_text: str) -> bool:
     return False
 
 
+# A single flat number applies to connect/read/write/pool alike. That's wrong
+# here: the connect phase should fail fast on a truly dead host, but the read
+# phase has to wait out a large, non-streamed completion (max_tokens=2500 of
+# narration for every beat in the video, generated in one shot). A flat 90s
+# was tight enough that GMI Cloud would sometimes still be generating -- and
+# billing tokens for -- a response our client had already given up reading,
+# which then triggered a *second* billed attempt on retry.
+GMI_TIMEOUT = httpx.Timeout(connect=10.0, read=240.0, write=30.0, pool=10.0)
+
+
 async def _call_gmi_chat(payload: dict, gmi_api_key: str) -> httpx.Response:
     """POST to GMI Cloud's chat completions endpoint, retrying transient
     upstream failures with exponential backoff + jitter. Returns the final
@@ -113,7 +123,7 @@ async def _call_gmi_chat(payload: dict, gmi_api_key: str) -> httpx.Response:
 
     for attempt in range(GMI_MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=GMI_TIMEOUT) as client:
                 response = await client.post(
                     GMI_CHAT_URL,
                     headers={"Authorization": f"Bearer {gmi_api_key}",
@@ -122,14 +132,18 @@ async def _call_gmi_chat(payload: dict, gmi_api_key: str) -> httpx.Response:
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             last_exc = exc
+            # httpx's own timeout/network exceptions frequently carry no
+            # message text at all, so str(exc) alone renders as blank and
+            # looks like a logging bug rather than a real, diagnosable error.
+            exc_detail = str(exc) or type(exc).__name__
             if attempt == GMI_MAX_RETRIES:
                 raise RuntimeError(
                     f"GMI Cloud unreachable after {GMI_MAX_RETRIES + 1} "
-                    f"attempts: {exc}") from exc
+                    f"attempts: {exc_detail}") from exc
             delay = GMI_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, 1)
             logger.warning(
                 "GMI Cloud network error (attempt %d/%d): %s — retrying in %.1fs",
-                attempt + 1, GMI_MAX_RETRIES + 1, exc, delay)
+                attempt + 1, GMI_MAX_RETRIES + 1, exc_detail, delay)
             await asyncio.sleep(delay)
             continue
 
