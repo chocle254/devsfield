@@ -85,9 +85,9 @@ async def generate(request: GenerateRequest) -> dict:
     # Required environment variables
     # NOTE: ELEVENLABS_API_KEY removed — voice_generator.py now uses
     # genblaze-gmicloud (GMICloudAudioProvider), which only needs
-    # GMI_CLOUD_API_KEY. NVIDIA_API_KEY powers the vision fallback used for
-    # visually grounded browser interaction. No separate ElevenLabs account
-    # is needed.
+    # GMI_CLOUD_API_KEY. Vision-grounded browser navigation (app_browser.py)
+    # also runs on GMI_CLOUD_API_KEY now (Claude Sonnet / Gemini Flash-Lite
+    # via GMI Cloud) — NVIDIA_API_KEY is no longer used anywhere.
     if not os.environ.get("GITHUB_TOKEN"):
         raise HTTPException(
             status_code=400,
@@ -97,11 +97,6 @@ async def generate(request: GenerateRequest) -> dict:
         raise HTTPException(
             status_code=400,
             detail="Server configuration error: GMI_CLOUD_API_KEY not set",
-        )
-    if not os.environ.get("NVIDIA_API_KEY"):
-        raise HTTPException(
-            status_code=400,
-            detail="Server configuration error: NVIDIA_API_KEY not set",
         )
     if not os.environ.get("B2_BUCKET"):
         raise HTTPException(
