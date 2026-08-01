@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 GMI_CHAT_URL = "https://api.gmi-serving.com/v1/chat/completions"
 NAV_MODEL = "deepseek-ai/DeepSeek-V3.2"
 NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-VISION_NAV_MODEL = "qwen/qwen3.5-397b-a17b"
+VISION_NAV_MODEL = "qwen/qwen3.6-35b-a3b"
 
 # How long we're willing to wait for a page before moving on (slow networks)
 GOTO_TIMEOUT_MS = 25000
@@ -1368,6 +1368,13 @@ Return ONLY valid JSON:
                     "max_tokens": 500,
                 },
             )
+        if response.status_code == 410:
+            logger.error(
+                "[nav] vision navigation model %r has been deprecated by "
+                "the provider (HTTP 410: %s) — update VISION_NAV_MODEL to "
+                "a current model; using local heuristic action until fixed.",
+                VISION_NAV_MODEL, response.text[:300])
+            return fallback
         if response.status_code != 200:
             logger.warning(
                 "[nav] vision navigation model HTTP %d: %s; using local "
