@@ -1,4 +1,4 @@
-E"""
+"""
 Plan-guided app navigation with segment timestamp tracking.
 
 Key behaviors:
