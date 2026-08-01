@@ -1,4 +1,4 @@
-"""
+E"""
 Plan-guided app navigation with segment timestamp tracking.
 
 Key behaviors:
@@ -304,6 +304,8 @@ async def _discover_live_controls(page) -> list[dict]:
                   el.getAttribute('id'));
                 const href = el.tagName.toLowerCase() === 'a'
                   ? (el.getAttribute('href') || '') : '';
+                const linkTarget = el.tagName.toLowerCase() === 'a'
+                  ? (el.getAttribute('target') || '') : '';
                 const options = el.tagName.toLowerCase() === 'select'
                   ? Array.from(el.options).filter((option) => !option.disabled)
                     .map((option) => squash(option.textContent || option.value)).filter(Boolean).slice(0, 12)
