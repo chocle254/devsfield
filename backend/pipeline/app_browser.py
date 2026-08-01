@@ -176,6 +176,7 @@ async def _capture_reasoning_frame(page) -> str | None:
     snapshot asset.  It uses the same sensitive-field mask as reel snapshots
     and refuses images too large for NVIDIA's inline image limit.
     """
+    last_size = None
     try:
         sensitive_fields = page.locator(SENSITIVE_FIELD_SELECTOR)
         # A first pass keeps detail for small/simple UIs; a second pass makes
@@ -189,10 +190,17 @@ async def _capture_reasoning_frame(page) -> str | None:
                 caret="hide",
                 mask=[sensitive_fields],
             )
-            if len(image) <= MAX_INLINE_REASONING_FRAME_BYTES:
+            last_size = len(image)
+            if last_size <= MAX_INLINE_REASONING_FRAME_BYTES:
                 return base64.b64encode(image).decode("ascii")
-    except Exception:
-        pass
+        logger.warning(
+            "[nav] reasoning frame too large for inline vision call "
+            "(%d bytes > %d limit even at lowest quality); falling back "
+            "to local heuristic action.", last_size, MAX_INLINE_REASONING_FRAME_BYTES)
+    except Exception as exc:
+        logger.warning(
+            "[nav] reasoning frame screenshot failed (%s); falling back "
+            "to local heuristic action.", exc)
     return None
 
 
@@ -421,6 +429,57 @@ def _ground_planned_step(step: dict | None, controls: list[dict]) -> dict | None
     }
 
 
+# Heuristic (keywords -> plausible demo value) used only when the navigation
+# model is unavailable. Checked, most-specific-first, against a control's
+# combined name/label/placeholder text so e.g. a "county" filter gets typed a
+# real county name instead of the literal words "Demo example".
+_FIELD_VALUE_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("email",), "demo@example.com"),
+    (("password",), "DemoPass123!"),
+    (("phone", "mobile", "tel"), "555-0100"),
+    (("zip", "postal"), "94105"),
+    (("county",), "Los Angeles"),
+    (("city", "town"), "San Francisco"),
+    (("state", "province"), "California"),
+    (("country",), "United States"),
+    (("address",), "123 Main St"),
+    (("company", "organization", "business"), "Acme Inc."),
+    (("first name",), "Jordan"),
+    (("last name", "surname"), "Rivera"),
+    (("full name", "your name"), "Jordan Rivera"),
+    (("url", "website", "link"), "https://example.com"),
+)
+
+# Bare "search"/"filter"-style fields are app-specific lookups (a real
+# county, a product SKU, a ticket ID, ...) that no generic string can
+# satisfy correctly. Typing into them usually just produces an empty "no
+# results" state, which looks broken on camera, so we skip them instead.
+_UNGUESSABLE_LOOKUP_TERMS = ("search", "filter", "lookup", "find", "query")
+
+
+def _infer_demo_value(control: dict) -> str | None:
+    """Guess a plausible value for a text field from its visible label text.
+
+    Returns None when the field can't be confidently interpreted, so the
+    caller skips it and looks for a different control instead of typing an
+    unrelated literal string into an app-specific field (e.g. a counties
+    search bar).
+    """
+    haystack = " ".join(
+        _normalise_text(control.get(key))
+        for key in ("name", "label", "placeholder")
+        if control.get(key)
+    )
+    if not haystack:
+        return None
+    for keywords, value in _FIELD_VALUE_HINTS:
+        if any(keyword in haystack for keyword in keywords):
+            return value
+    if any(term in haystack for term in _UNGUESSABLE_LOOKUP_TERMS):
+        return None
+    return "Demo example"
+
+
 def _fallback_action(controls: list[dict], actions_taken: list,
                      planned_step: dict | None, beat: dict) -> dict:
     """Choose a grounded local action when the navigation model is unavailable."""
@@ -430,12 +489,27 @@ def _fallback_action(controls: list[dict], actions_taken: list,
 
     used = {entry.get("control_id") for entry in actions_taken}
     # A new text field is a useful, visible low-risk interaction even without
-    # an LLM response.  Sensitive/account fields were filtered before here.
+    # an LLM response. Sensitive/account fields were filtered before here.
+    # Skip any textbox we can't confidently interpret (e.g. an app-specific
+    # search/filter/lookup box) rather than typing an unrelated literal
+    # string into it — that's how "Demo example" ended up in a counties
+    # search bar. We keep scanning for a field we *can* fill sensibly, or
+    # fall through to the click-based logic below.
     for control in controls:
         if (control.get("id") not in used and control.get("role") == "textbox" and
                 _action_matches_control("type", control)):
+            value = _infer_demo_value(control)
+            if value is None:
+                logger.info(
+                    "[nav] fallback: skipping unguessable field %r "
+                    "(placeholder=%r), trying next control.",
+                    control.get("name"), control.get("placeholder"))
+                continue
+            logger.info(
+                "[nav] fallback: typing %r into %r (placeholder=%r).",
+                value, control.get("name"), control.get("placeholder"))
             return {
-                "action": "type", "control_id": control["id"], "value": "Demo example",
+                "action": "type", "control_id": control["id"], "value": value,
                 "reason": f"Enter a demo value in {control.get('name')}.",
                 "beat_complete": False, "expected_result": "", "planned_step": False,
             }
@@ -447,11 +521,14 @@ def _fallback_action(controls: list[dict], actions_taken: list,
             continue
         name = _normalise_text(control.get("name"))
         if control.get("role") == "tab" or any(term in name for term in preferred_terms):
+            logger.info(
+                "[nav] fallback: clicking %r.", control.get("name"))
             return {
                 "action": "click", "control_id": control["id"], "value": None,
                 "reason": f"Open the {control.get('name')} section.",
                 "beat_complete": False, "expected_result": "", "planned_step": False,
             }
+    logger.info("[nav] fallback: no fillable/clickable control found, scrolling.")
     return {
         "action": "scroll", "control_id": None, "value": None,
         "reason": beat.get("talking_point", ""), "beat_complete": False,
@@ -1108,9 +1185,15 @@ def _normalise_live_decision(raw: object, controls: list[dict], fallback: dict,
                              planned_step: dict | None) -> dict:
     """Reject model output that is not grounded to the supplied live controls."""
     if not isinstance(raw, dict):
+        logger.warning(
+            "[nav] vision navigation model returned non-JSON-object output "
+            "(%r); using local heuristic action.", raw)
         return fallback
     action = str(raw.get("action") or "").lower().strip()
     if action not in SAFE_ACTIONS:
+        logger.warning(
+            "[nav] vision navigation model returned unsafe/unknown action "
+            "%r; using local heuristic action.", action)
         return fallback
     if action == "scroll":
         return {
@@ -1122,7 +1205,23 @@ def _normalise_live_decision(raw: object, controls: list[dict], fallback: dict,
 
     control_id = str(raw.get("control_id") or "")
     control = next((item for item in controls if item.get("id") == control_id), None)
-    if control is None or not _control_is_safe(control) or not _action_matches_control(action, control):
+    if control is None:
+        logger.warning(
+            "[nav] vision navigation model referenced unknown control_id "
+            "%r (not in the live control list); using local heuristic "
+            "action.", control_id)
+        return fallback
+    if not _control_is_safe(control):
+        logger.warning(
+            "[nav] vision navigation model targeted an unsafe control "
+            "(id=%r, name=%r); using local heuristic action.",
+            control_id, control.get("name"))
+        return fallback
+    if not _action_matches_control(action, control):
+        logger.warning(
+            "[nav] vision navigation model action %r doesn't match control "
+            "role (id=%r, role=%r); using local heuristic action.",
+            action, control_id, control.get("role"))
         return fallback
 
     planned_action = str((planned_step or {}).get("action") or "").lower()
@@ -1132,8 +1231,14 @@ def _normalise_live_decision(raw: object, controls: list[dict], fallback: dict,
     if value is not None:
         value = str(value).strip()[:240]
     if action in {"type", "select", "press"} and not value:
+        logger.warning(
+            "[nav] vision navigation model gave action=%r with no value; "
+            "using local heuristic action.", action)
         return fallback
     if action == "press" and value not in ALLOWED_KEYS:
+        logger.warning(
+            "[nav] vision navigation model gave a disallowed key %r for "
+            "press; using local heuristic action.", value)
         return fallback
 
     matches_plan = bool(
@@ -1172,10 +1277,21 @@ async def _get_next_action(observation: dict, beat: dict, actions_taken: list,
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     nvidia_api_key = os.environ.get("NVIDIA_API_KEY")
     if not gmi_api_key or not nvidia_api_key or page is None:
+        missing = [
+            name for name, val in (
+                ("GMI_CLOUD_API_KEY", gmi_api_key),
+                ("NVIDIA_API_KEY", nvidia_api_key),
+                ("page", page),
+            ) if not val
+        ]
+        logger.warning(
+            "[nav] vision navigation model skipped, missing: %s; using "
+            "local heuristic action.", ", ".join(missing))
         return fallback
 
     reasoning_frame = await _capture_reasoning_frame(page)
     if not reasoning_frame:
+        # _capture_reasoning_frame already logged the specific reason.
         return fallback
 
     control_summary = [
@@ -1253,6 +1369,9 @@ Return ONLY valid JSON:
                 },
             )
         if response.status_code != 200:
+            logger.warning(
+                "[nav] vision navigation model HTTP %d: %s; using local "
+                "heuristic action.", response.status_code, response.text[:300])
             return fallback
         content = response.json()["choices"][0]["message"]["content"].strip()
         if content.startswith("```json"):
@@ -1262,7 +1381,10 @@ Return ONLY valid JSON:
         if content.endswith("```"):
             content = content[:-3]
         return _normalise_live_decision(json.loads(content.strip()), controls, fallback, planned_step)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "[nav] vision navigation model call failed (%s); using local "
+            "heuristic action.", exc)
         return fallback
 
 
