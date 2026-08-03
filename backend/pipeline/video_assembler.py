@@ -36,6 +36,13 @@ from pipeline.segment_tool import (
 # so it needs a larger budget than a single-clip operation.
 CONCAT_TIMEOUT = 600
 
+# A single ffmpeg call holding many inputs open at once in one filter_complex
+# (each input needs its own video+audio decoder, alongside the concat graph
+# and a fresh libx264 encode) can spike memory enough to get OOM-killed with
+# no ffmpeg error text at all — the process just dies mid-encode. Merging in
+# small batches keeps at most this many decoders open per ffmpeg call.
+CONCAT_BATCH_SIZE = 4
+
 # Canonical output spec. Every clip is forced to match this exactly so the
 # concat step produces one continuous, audible, full-size video.
 OUT_W = 1280
@@ -190,23 +197,8 @@ async def normalize_clip(input_path: str, output_path: str) -> str:
         return output_path
 
 
-async def concat_segments(clip_paths: list[str], output_path: str,
-                          job_id: str) -> str:
-    """Concatenate already-normalized clips into one continuous MP4.
-
-    Use ffmpeg's concat *filter* rather than its concat demuxer.  The filter
-    creates one continuous audio/video timeline even when segment timestamps or
-    AAC encoder delay differ slightly, which is common with independently
-    rendered clips.  It also lets us verify that the resulting download still
-    covers the duration of every input clip.
-    """
-    if not clip_paths:
-        raise ValueError("Cannot concatenate an empty clip list")
-
-    # ``get_duration`` is asynchronous, so resolve each probe before adding
-    # them.  Passing an async generator directly to ``sum`` raises before
-    # ffmpeg is invoked.
-    expected_duration = sum([await get_duration(path) for path in clip_paths])
+async def _concat_batch(clip_paths: list[str], output_path: str) -> str:
+    """Run ffmpeg's concat filter over a single small batch of clips."""
     input_args: list[str] = []
     filter_inputs = []
     for index, path in enumerate(clip_paths):
@@ -224,6 +216,60 @@ async def concat_segments(clip_paths: list[str], output_path: str,
         output_path, "-y",
     ]
     await run_subprocess(cmd, timeout=CONCAT_TIMEOUT, label="Final concat")
+    return output_path
+
+
+async def concat_segments(clip_paths: list[str], output_path: str,
+                          job_id: str) -> str:
+    """Concatenate already-normalized clips into one continuous MP4.
+
+    Use ffmpeg's concat *filter* rather than its concat demuxer.  The filter
+    creates one continuous audio/video timeline even when segment timestamps or
+    AAC encoder delay differ slightly, which is common with independently
+    rendered clips.  It also lets us verify that the resulting download still
+    covers the duration of every input clip.
+
+    Clips are merged in small batches (CONCAT_BATCH_SIZE at a time) rather
+    than one giant filter_complex over every input. A single ffmpeg call
+    holding e.g. 11 decoders open at once for a full re-encode is a common
+    way to get silently OOM-killed with no ffmpeg error text at all.
+    """
+    if not clip_paths:
+        raise ValueError("Cannot concatenate an empty clip list")
+
+    # ``get_duration`` is asynchronous, so resolve each probe before adding
+    # them.  Passing an async generator directly to ``sum`` raises before
+    # ffmpeg is invoked.
+    expected_duration = sum([await get_duration(path) for path in clip_paths])
+
+    current_paths = list(clip_paths)
+    intermediate_paths: list[str] = []
+    round_num = 0
+    try:
+        while len(current_paths) > 1:
+            round_num += 1
+            next_paths = []
+            for batch_index, i in enumerate(range(0, len(current_paths), CONCAT_BATCH_SIZE)):
+                batch = current_paths[i:i + CONCAT_BATCH_SIZE]
+                if len(batch) == 1:
+                    next_paths.append(batch[0])
+                    continue
+                batch_output = f"{output_path}.round{round_num}batch{batch_index}.mp4"
+                await _concat_batch(batch, batch_output)
+                intermediate_paths.append(batch_output)
+                next_paths.append(batch_output)
+            current_paths = next_paths
+
+        final_intermediate = current_paths[0]
+        if final_intermediate != output_path:
+            os.replace(final_intermediate, output_path)
+            intermediate_paths = [p for p in intermediate_paths if p != final_intermediate]
+    finally:
+        for path in intermediate_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     actual_duration = await get_duration(output_path)
     # Frame rounding and AAC priming can cost a few milliseconds per input;
