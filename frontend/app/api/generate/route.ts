@@ -7,6 +7,15 @@ const DURATION_MIN = 60
 const DURATION_MAX = 300
 const ALLOWED_TONES = ["pitch", "demo", "technical", "pitch_demo"] as const
 
+// Mirrors backend/models.py + backend/pipeline/demo_planner.py so a
+// malformed scene never reaches the backend as anything but dropped/trimmed
+// input — the backend re-validates and re-sanitizes regardless, this just
+// avoids a confusing 422 for garden-variety stray whitespace or over-length
+// text.
+const SAFE_ACTIONS = ["click", "type", "select", "toggle", "press", "scroll"]
+const MAX_BEATS = 10
+const MAX_STEPS_PER_BEAT = 5
+
 function isLikelyUrl(v: string) {
   try {
     const u = new URL(v)
@@ -16,19 +25,68 @@ function isLikelyUrl(v: string) {
   }
 }
 
+type StoryboardStepInput = {
+  action?: string
+  target?: string
+  value?: string
+  expected_result?: string
+}
+
+type StoryboardBeatInput = {
+  route?: string
+  feature?: string
+  actions_hint?: string
+  talking_point?: string
+  seconds?: number
+  interaction_steps?: StoryboardStepInput[]
+}
+
 type RequestBody = {
   repoUrl?: string
   appUrl?: string
   options?: {
     maxDurationSec?: number
     tone?: string
-    /** named voice (e.g. "lamin", "julius", "sinclair") sent to the backend */
+    /** voice preference ("male" or "female") sent to the backend */
     voice?: string
     /** @deprecated legacy field from the old mock form, mapped to `tone` below */
     format?: string
     /** optional demo-account login for apps behind authentication */
     credentials?: { username?: string; password?: string }
+    /** developer-authored shot list; skips AI planning when present */
+    storyboard?: StoryboardBeatInput[]
   }
+}
+
+/** Returns undefined when there's nothing usable, so the backend falls back
+ * to its normal AI-planned behavior instead of receiving an empty array. */
+function sanitizeStoryboard(raw: StoryboardBeatInput[] | undefined) {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+
+  const beats = raw.slice(0, MAX_BEATS).map((beat) => {
+    const interaction_steps = Array.isArray(beat.interaction_steps)
+      ? beat.interaction_steps
+          .slice(0, MAX_STEPS_PER_BEAT)
+          .map((s) => ({
+            action: (s.action ?? "").toLowerCase().trim(),
+            target: (s.target ?? "").trim().slice(0, 120),
+            value: s.value?.trim().slice(0, 240) || undefined,
+            expected_result: s.expected_result?.trim().slice(0, 180) || undefined,
+          }))
+          .filter((s) => SAFE_ACTIONS.includes(s.action) && s.target)
+      : []
+
+    return {
+      route: (beat.route || "/").trim().slice(0, 200) || "/",
+      feature: beat.feature?.trim().slice(0, 160) || undefined,
+      actions_hint: beat.actions_hint?.trim().slice(0, 300) || undefined,
+      talking_point: beat.talking_point?.trim().slice(0, 300) || undefined,
+      seconds: Number.isFinite(beat.seconds) ? beat.seconds : undefined,
+      interaction_steps,
+    }
+  })
+
+  return beats.length > 0 ? beats : undefined
 }
 
 export async function POST(req: Request) {
@@ -73,9 +131,9 @@ export async function POST(req: Request) {
     tone = "pitch"
   }
 
-  // Optional named voice: only forward a known value so the backend falls
-  // back to its tone-based default for anything unexpected.
-  const ALLOWED_VOICES = ["lamin", "julius", "sinclair"]
+  // Optional voice preference: only forward a known value so the backend
+  // falls back to its tone-based default for anything unexpected.
+  const ALLOWED_VOICES = ["male", "female"]
   const rawVoice = body.options?.voice?.trim().toLowerCase()
   const voice = rawVoice && ALLOWED_VOICES.includes(rawVoice) ? rawVoice : undefined
 
@@ -87,6 +145,8 @@ export async function POST(req: Request) {
     rawCreds?.username?.trim() && rawCreds?.password
       ? { username: rawCreds.username.trim(), password: rawCreds.password }
       : undefined
+
+  const storyboard = sanitizeStoryboard(body.options?.storyboard)
 
   let backendRes: Response
   try {
@@ -100,6 +160,7 @@ export async function POST(req: Request) {
         tone,
         voice,
         credentials,
+        storyboard,
       }),
     })
   } catch (e: unknown) {
