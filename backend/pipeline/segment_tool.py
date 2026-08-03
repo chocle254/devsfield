@@ -98,11 +98,20 @@ async def pad_video_to_duration(video_path: str, target_duration: float,
                                  output_path: str) -> str:
     """Freeze the last frame to stretch a video clip to target_duration."""
     current = await get_duration(video_path)
-    pad_seconds = max(0.0, target_duration - current)
+    # Round to milliseconds to avoid floating-point residues like
+    # 8.881784197001252e-16 that ffmpeg's duration parser can't read
+    # (it doesn't accept scientific notation).
+    pad_seconds = round(max(0.0, target_duration - current), 3)
+
+    if pad_seconds <= 0.0:
+        # Nothing to pad - just copy the file through unchanged.
+        cmd = ["ffmpeg", "-i", video_path, "-c", "copy", output_path, "-y"]
+        await run_subprocess(cmd, timeout=FFMPEG_TIMEOUT, label="Video copy")
+        return output_path
 
     cmd = [
         "ffmpeg", "-i", video_path,
-        "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds}",
+        "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}",
         "-c:v", "libx264",
         output_path, "-y",
     ]
