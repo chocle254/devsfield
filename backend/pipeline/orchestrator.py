@@ -156,7 +156,7 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
             await set_step(job_id, "voice_generator", "Generating voiceover per segment...")
             voiced_segments = await voice_generator.generate_segment_voices(
                 script_segments, job_id, tone=request.tone,
-                voice=getattr(request, "voice", None))
+                voice=getattr(request, "voice", None), context=context)
             for seg in voiced_segments:
                 # Voice generation validates an asset for every segment before
                 # assembly; retain each one for a resumable, audible render.
