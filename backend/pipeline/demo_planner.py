@@ -7,6 +7,16 @@ of demo beats. The browser then follows this plan, and if time runs short
 (slow network, slow pages), the lowest-priority beats are dropped — so the
 video always fits the requested length and always leads with the best
 features.
+
+A developer who already knows their own app can skip the guesswork entirely:
+``plan_demo(..., storyboard=[...])`` bypasses the LLM and turns a
+developer-authored list of beats straight into this same plan shape. This is
+NOT a separate code path with its own rules — ``_beats_from_storyboard``
+reuses the exact same safety normalizer (``_normalise_interaction_steps``,
+which strips destructive actions and bounds step count/length) and the exact
+same time-budget fitter (``_use_full_time_budget``) that the LLM path uses,
+so a hand-written storyboard is exactly as safe to execute as a generated
+one — it just isn't guessing at what to click.
 """
 import json
 import os
@@ -287,8 +297,60 @@ def _fallback_with_full_time(context: dict, usable_seconds: int) -> dict:
     return fallback
 
 
+def _beats_from_storyboard(storyboard: list, context: dict,
+                           usable_seconds: int, has_credentials: bool) -> dict:
+    """Turn a developer-authored storyboard into the standard plan shape.
+
+    Each entry is a beat: which page to be on, what to click/type/expect, and
+    the one idea the narration should land. Unlike the LLM path, the route is
+    trusted as given rather than forced back to detected_routes — the
+    developer describing their own app is authoritative in a way a
+    README-derived route list can't be (it can easily miss dynamic or
+    generated routes). Everything else — action safety, step count, target/
+    value length, duration bounds — goes through the identical normalizer and
+    time-budget fitter the LLM path uses, so nothing here skips a guardrail;
+    it only skips the guessing.
+    """
+    catalog = context.get("interaction_catalog") or []
+    kept: list[dict] = []
+    for raw in storyboard[:MAX_BEATS]:
+        if not isinstance(raw, dict):
+            continue
+        route = str(raw.get("route") or "/").strip() or "/"
+        try:
+            seconds = max(
+                MIN_BEAT_SECONDS,
+                min(MAX_BEAT_SECONDS, int(raw.get("seconds") or 20)),
+            )
+        except (TypeError, ValueError):
+            seconds = 20
+        fallback_steps = _catalog_steps(catalog, route)
+        clean_beat = {
+            "priority": len(kept) + 1,
+            "feature": str(raw.get("feature") or f"Page {route}").strip()[:160],
+            "route": route,
+            "actions_hint": str(
+                raw.get("actions_hint") or "Follow the developer-provided steps."
+            ).strip()[:300],
+            "talking_point": str(raw.get("talking_point") or "").strip()[:300],
+            "seconds": seconds,
+            "interaction_steps": _normalise_interaction_steps(
+                raw.get("interaction_steps"), fallback_steps),
+        }
+        kept.append(clean_beat)
+
+    if not kept:
+        return _fallback_with_full_time(context, usable_seconds)
+
+    return {
+        "beats": _use_full_time_budget(kept, usable_seconds),
+        "needs_login": bool(context.get("has_auth")) and has_credentials,
+        "app_summary": context.get("description") or context.get("repo_name", ""),
+    }
+
+
 async def plan_demo(context: dict, video_length: int,
-                    has_credentials: bool) -> dict:
+                    has_credentials: bool, storyboard: list | None = None) -> dict:
     """
     Returns:
         {
@@ -305,6 +367,13 @@ async def plan_demo(context: dict, video_length: int,
         }
     """
     usable_seconds = max(30, video_length - RESERVED_SECONDS)
+
+    # Developer-authored storyboard: skip the LLM entirely and build the plan
+    # straight from what the developer already told us to do.
+    if storyboard:
+        return _beats_from_storyboard(
+            storyboard, context, usable_seconds, has_credentials)
+
     minimum_beats = _minimum_beats_for_duration(usable_seconds)
     maximum_beats = _maximum_beats_for_duration(usable_seconds)
 
