@@ -54,6 +54,21 @@ def _selected_duration_tolerance(target_duration: float) -> float:
     return max(1.0, min(3.0, float(target_duration) * 0.01))
 
 
+# Mirrors video_assembler.MAX_OVERSHOOT_SECONDS — a shorter-than-requested
+# video is fine (narration just wrapped up early), an over-length one is
+# capped at this many seconds past the requested duration.
+_MAX_OVERSHOOT_SECONDS = 40.0
+
+
+def _duration_within_budget(actual_duration: float, requested_duration: float) -> bool:
+    """Asymmetric check: any shortfall is fine; overshoot is capped."""
+    if not math.isfinite(actual_duration):
+        return False
+    if actual_duration <= requested_duration:
+        return True
+    return (actual_duration - requested_duration) <= _MAX_OVERSHOOT_SECONDS
+
+
 def _validate_verified_upload(segment_clips: list[dict],
                               requested_duration: float | None,
                               actual_duration: float | None,
@@ -70,8 +85,7 @@ def _validate_verified_upload(segment_clips: list[dict],
             "Final video is missing verified duration or narration metadata") from exc
 
     if (not math.isfinite(requested) or requested <= 0 or
-            not math.isfinite(actual) or
-            abs(actual - requested) > _selected_duration_tolerance(requested)):
+            not _duration_within_budget(actual, requested)):
         raise ValueError(
             f"Refusing to upload an incomplete final video "
             f"({actual:.1f}s for a {requested:.1f}s selection)")
