@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 FFPROBE_TIMEOUT = 30
 FFMPEG_TIMEOUT = 180
 
+# Normal TTS speaking-rate variation is expected. A larger mismatch between a
+# segment's narration audio and its planned on-screen duration means a bad
+# narration asset and must not become a silently broken final video.
+#
+# Shared by two stages: voice_generator uses it to decide whether a freshly
+# generated clip needs a duration-fit retry *before* assembly ever sees it,
+# and video_assembler uses the same threshold as its hard, last-resort
+# publish gate. They must agree on one number, or a clip voice_generator
+# accepted as "close enough" could still be rejected downstream (or vice
+# versa) — so this lives in one place instead of two constants that can
+# drift apart.
+VOICE_DURATION_TOLERANCE = 0.25
+
 
 async def run_subprocess(cmd: list[str], *, timeout: float, label: str) -> tuple[bytes, bytes]:
     """
