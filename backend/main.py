@@ -59,8 +59,8 @@ def _is_verified_v3_master(result: object) -> bool:
     except (KeyError, TypeError, ValueError):
         return False
     segments = result.get("segments")
-    if (not math.isfinite(requested) or not math.isfinite(actual) or
-            abs(actual - requested) > storage._selected_duration_tolerance(requested) or
+    if (not math.isfinite(requested) or
+            not storage._duration_within_budget(actual, requested) or
             not isinstance(segments, list) or not segments or
             voiced_count != len(segments)):
         return False
