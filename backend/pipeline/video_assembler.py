@@ -29,6 +29,7 @@ from pipeline.segment_tool import (
     fit_video_to_duration,
     run_subprocess,
     FFMPEG_TIMEOUT,
+    VOICE_DURATION_TOLERANCE,
 )
 
 # The final concat re-encodes every segment plus the title card into one file,
@@ -43,9 +44,9 @@ OUT_FPS = 30
 OUT_SR = 44100  # audio sample rate
 TITLE_CARD_SECONDS = 3.0
 ASSEMBLY_CONTRACT_VERSION = 3
-# Normal TTS speaking-rate variation is expected. A larger mismatch means a
-# bad narration asset and must not become a silently broken final video.
-VOICE_DURATION_TOLERANCE = 0.25
+# VOICE_DURATION_TOLERANCE is imported from segment_tool above — this is the
+# final, unconditional gate. voice_generator applies the same threshold
+# earlier to retry a mismatched clip before it ever reaches this check.
 
 
 def duration_tolerance(target_duration: float) -> float:
