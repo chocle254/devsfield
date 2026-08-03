@@ -411,9 +411,18 @@ def _ground_planned_step(step: dict | None, controls: list[dict]) -> dict | None
         return None
     action = str(step.get("action") or "").lower()
     if action == "scroll":
+        # A developer-authored scroll step names what should come into view
+        # (e.g. a heading's text) — that text isn't matched against
+        # `controls` at all (headings aren't interactive elements, so the
+        # DOM scan never captures them), so it's carried straight through
+        # for _perform_action to look up via get_by_text against the whole
+        # page. No target -> the original generic "reveal more" nudge.
+        target_text = str(step.get("target") or "").strip()
         return {
             "action": "scroll", "control_id": None, "value": None,
-            "reason": "Reveal the next learned section.", "beat_complete": False,
+            "scroll_target": target_text or None,
+            "reason": f"Scroll to {target_text}." if target_text else "Reveal the next learned section.",
+            "beat_complete": False,
             "expected_result": step.get("expected_result", ""), "planned_step": True,
         }
     candidates = [
@@ -1434,10 +1443,25 @@ async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
 
     try:
         if action == "scroll":
-            await page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
+            scrolled_to_target = False
+            scroll_target = str(decision.get("scroll_target") or "").strip()
+            if scroll_target:
+                try:
+                    text_locator = page.get_by_text(scroll_target, exact=False).first
+                    if await text_locator.count() > 0:
+                        await text_locator.scroll_into_view_if_needed(timeout=3000)
+                        scrolled_to_target = True
+                except Exception:
+                    # Text not found/visible (typo, dynamic content not yet
+                    # rendered, etc.) — fall through to the generic nudge
+                    # below rather than failing the whole step.
+                    scrolled_to_target = False
+            if not scrolled_to_target:
+                await page.evaluate("window.scrollBy({top: 450, behavior: 'smooth'})")
             await page.wait_for_timeout(INTERACTION_SETTLE_MS)
             after = await _interaction_state(page)
-            return {"succeeded": _state_changed(before, after), "effect": "scroll", "state": after}
+            effect = "scroll-to-target" if scrolled_to_target else "scroll"
+            return {"succeeded": _state_changed(before, after), "effect": effect, "state": after}
 
         locator = await _resolve_control(page, control, decision.get("target", ""))
         if locator is None:
