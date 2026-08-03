@@ -9,6 +9,31 @@ class AppCredentials(BaseModel):
     password: str
 
 
+class StoryboardStep(BaseModel):
+    """One concrete, developer-specified action within a beat.
+
+    `target` should match the visible label, placeholder, or name of the
+    control (e.g. "Add task", "Email address") — the browser grounds this
+    against the real page's accessible controls before acting, so it does
+    NOT need to be a CSS selector or element id. `expected_result`, when
+    given, is checked against the page's actual state after the action runs.
+    """
+    action: str = Field(..., description="click, type, select, toggle, press, or scroll")
+    target: str = Field(..., min_length=1, max_length=120)
+    value: Optional[str] = Field(default=None, max_length=240)
+    expected_result: Optional[str] = Field(default="", max_length=180)
+
+
+class StoryboardBeat(BaseModel):
+    """One shot of the demo: a page, what happens on it, and what to say."""
+    route: str = Field(default="/", max_length=200)
+    feature: Optional[str] = Field(default=None, max_length=160)
+    actions_hint: Optional[str] = Field(default=None, max_length=300)
+    talking_point: Optional[str] = Field(default=None, max_length=300)
+    seconds: Optional[int] = Field(default=None, ge=1, le=300)
+    interaction_steps: list[StoryboardStep] = Field(default_factory=list)
+
+
 class GenerateRequest(BaseModel):
     """Request to generate a demo video."""
     github_url: str
@@ -17,6 +42,11 @@ class GenerateRequest(BaseModel):
     tone: str = Field(default="pitch")  # "pitch", "pitch_demo", "demo", or "technical"
     voice: Optional[str] = None
     credentials: Optional[AppCredentials] = None
+    # Developer-authored shot list. When provided, the planner skips the LLM
+    # entirely and builds the plan straight from these beats (still passed
+    # through the same safety normalizer as an AI-generated plan). Omit or
+    # leave empty to keep the default AI-planned behavior.
+    storyboard: Optional[list[StoryboardBeat]] = None
 
 
 class NavigationSnapshot(BaseModel):
