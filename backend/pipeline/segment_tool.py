@@ -62,7 +62,15 @@ async def run_subprocess(cmd: list[str], *, timeout: float, label: str) -> tuple
         raise TimeoutError(f"{label} timed out after {timeout}s")
 
     if proc.returncode != 0:
-        raise RuntimeError(f"{label} failed: {stderr.decode(errors='replace')}")
+        # A negative return code means the process was killed by a signal
+        # (e.g. -9 = SIGKILL, most often the OOM killer) rather than ffmpeg
+        # exiting on its own — in that case stderr often has no error text
+        # at all, just the last progress line. Surface the code so that
+        # case is distinguishable from a real ffmpeg-reported failure.
+        raise RuntimeError(
+            f"{label} failed (exit code {proc.returncode}): "
+            f"{stderr.decode(errors='replace')}"
+        )
 
     return stdout, stderr
 
