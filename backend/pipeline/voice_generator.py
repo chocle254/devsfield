@@ -8,6 +8,17 @@ Voice is required for every segment. A generated asset is only accepted after
 it has been materialized, checked to be non-empty, and successfully probed by
 ffprobe. This prevents the video assembler from quietly producing an all- or
 partially-silent final video when a provider returns a bad asset.
+
+Duration fit: script_writer sizes each line's word count assuming a fixed
+2.4 words/second speaking pace, but that's a planning estimate — the actual
+TTS voice may speak noticeably faster or slower, so a clip can come out
+clearly shorter or longer than its segment's on-screen time even though the
+word count matched the plan. Rather than only discovering that mismatch at
+video_assembler's hard VOICE_DURATION_TOLERANCE gate (after which the whole
+job fails), this module checks each clip's duration against its segment as
+soon as it's generated and, if it's outside tolerance, rewrites the line to
+a word count scaled by the *measured* rate and re-synthesizes — before
+assembly ever sees it.
 """
 import asyncio
 import math
@@ -20,7 +31,8 @@ import httpx
 from genblaze_core import Pipeline, Modality
 from genblaze_gmicloud import GMICloudAudioProvider
 
-from .segment_tool import get_duration
+from .script_writer import resize_segment_text
+from .segment_tool import get_duration, VOICE_DURATION_TOLERANCE
 
 # --- Workaround for a genblaze-gmicloud payload bug (as of 0.3.5) ----------
 # GMICloud's own request-queue API requires the narration text to be sent
@@ -56,6 +68,20 @@ GEN_TIMEOUT = 120
 # already bounded by segment_tool's timeout, so this validation cannot hang a
 # job indefinitely.
 MIN_VALID_AUDIO_SECONDS = 0.05
+
+# How many times to rewrite-and-resynthesize a segment whose clip lands
+# outside VOICE_DURATION_TOLERANCE before giving up on this stage. Each
+# retry is a full TTS round-trip (bounded by GEN_TIMEOUT), so this is a
+# small number by design — video_assembler's hard gate is always the final
+# word if a clip still doesn't fit after these attempts.
+DURATION_FIT_RETRIES = 2
+
+# Guardrail on the words/second we infer from one measured clip. A very
+# short or glitchy clip could otherwise produce an absurd rate and cause a
+# wild overcorrection on the next attempt; real spoken narration falls
+# comfortably inside this range regardless of voice or language.
+MIN_PLAUSIBLE_WPS = 1.0
+MAX_PLAUSIBLE_WPS = 5.0
 
 
 async def materialize_asset(asset_url: str, dest_path: str, timeout: float = 60.0) -> None:
@@ -171,15 +197,85 @@ def _generate_one(job_id: str, segment_id: int, text: str,
     return step.assets[0].url
 
 
+def _visual_duration_for(seg: dict) -> float | None:
+    """Mirror video_assembler's own start/end -> duration calculation so the
+    two stages can never disagree about what a segment's target is."""
+    start = seg.get("start_time")
+    end = seg.get("end_time")
+    if start is None or end is None:
+        return None
+    return max(0.5, float(end) - float(start))
+
+
+async def _fit_segment_duration(
+    job_id: str, segment_id: int, text: str, audio_path: str, duration: float,
+    visual_duration: float, model: str, voice_id: str, gmi_api_key: str,
+    repo_name: str, tone: str, feature: str,
+) -> tuple[str, float, str]:
+    """If `duration` is already within tolerance of `visual_duration`, return
+    the inputs unchanged. Otherwise rewrite the line to a word count scaled
+    by this voice's *measured* speaking rate and re-synthesize, up to
+    DURATION_FIT_RETRIES times, keeping the best attempt so far at each step.
+    """
+    min_ok = visual_duration * (1.0 - VOICE_DURATION_TOLERANCE)
+    max_ok = visual_duration * (1.0 + VOICE_DURATION_TOLERANCE)
+    if min_ok <= duration <= max_ok:
+        return audio_path, duration, text
+
+    best_path, best_duration, best_text = audio_path, duration, text
+
+    for attempt in range(1, DURATION_FIT_RETRIES + 1):
+        words = max(1, len(best_text.split()))
+        measured_wps = min(MAX_PLAUSIBLE_WPS,
+                           max(MIN_PLAUSIBLE_WPS, words / best_duration))
+        new_target_words = max(8, round(visual_duration * measured_wps))
+
+        try:
+            new_text = await resize_segment_text(
+                best_text, new_target_words, repo_name, tone, feature, gmi_api_key)
+            new_path = f"/tmp/voice_{job_id}_seg{segment_id}_fit{attempt}.mp3"
+            _remove_incomplete_asset(new_path)
+            asset_url = await asyncio.to_thread(
+                _generate_one, job_id, segment_id, new_text, model, voice_id,
+                gmi_api_key)
+            if not isinstance(asset_url, str) or not asset_url.strip():
+                raise RuntimeError("provider returned no audio asset URL")
+            await materialize_asset(asset_url, new_path, timeout=60.0)
+            new_duration = await _validate_audio_asset(new_path)
+        except Exception as exc:  # noqa: BLE001 - keep the best asset so far
+            print(
+                f"[voice] segment {segment_id} duration-fit attempt "
+                f"{attempt} failed, keeping previous clip: {exc}",
+                flush=True,
+            )
+            break
+
+        print(
+            f"[voice] segment {segment_id} duration-fit attempt {attempt}: "
+            f"{new_duration:.2f}s (target {visual_duration:.1f}s, "
+            f"was {best_duration:.2f}s)",
+            flush=True,
+        )
+        _remove_incomplete_asset(best_path)
+        best_path, best_duration, best_text = new_path, new_duration, new_text
+
+        if min_ok <= best_duration <= max_ok:
+            break
+
+    return best_path, best_duration, best_text
+
+
 async def generate_segment_voices(script_segments: list[dict],
                                   job_id: str,
                                   tone: str = "pitch",
-                                  voice: str | None = None) -> list[dict]:
+                                  voice: str | None = None,
+                                  context: dict | None = None) -> list[dict]:
     gmi_api_key = os.environ.get("GMI_CLOUD_API_KEY")
     if not gmi_api_key:
         raise ValueError("GMI_CLOUD_API_KEY not set")
 
     gender = _gender_for(tone, voice)
+    repo_name = (context or {}).get("repo_name") or "this project"
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
     # Once one (model, voice) combo succeeds we lock it in so we don't re-probe
@@ -238,6 +334,15 @@ async def generate_segment_voices(script_segments: list[dict],
                         flush=True,
                     )
                     continue
+
+            if audio_path is not None:
+                visual_duration = _visual_duration_for(seg)
+                if visual_duration is not None:
+                    fit_model, fit_voice_id = working["combo"]
+                    audio_path, duration, text = await _fit_segment_duration(
+                        job_id, segment_id, text, audio_path, duration,
+                        visual_duration, fit_model, fit_voice_id, gmi_api_key,
+                        repo_name, tone, seg.get("feature", ""))
 
         if audio_path is None:
             tried_models = ", ".join(model for model, _ in attempts)
