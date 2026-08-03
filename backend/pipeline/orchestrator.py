@@ -100,8 +100,16 @@ async def run_pipeline(job_id: str, request: GenerateRequest) -> None:
             context = await github_reader.read_repo(request.github_url)
             # Repo-aware plan: which features to show, in what order, with a
             # per-beat time budget that fits the requested video length.
+            # If the developer supplied a storyboard, plan_demo builds the
+            # plan straight from it instead of asking the LLM to guess.
+            storyboard = (
+                [beat.model_dump() for beat in request.storyboard]
+                if request.storyboard else None
+            )
             plan = await demo_planner.plan_demo(
-                context, request.video_length, has_credentials=credentials is not None)
+                context, request.video_length,
+                has_credentials=credentials is not None,
+                storyboard=storyboard)
             await save_checkpoint(job_id, "context", context)
             await save_checkpoint(job_id, "plan", plan)
             await _advance(job_id, "github_reader")
