@@ -1,6 +1,11 @@
 "use client"
 
 import { useState } from "react"
+import {
+  StoryboardEditor,
+  emptyBeat,
+  type StoryboardBeatDraft,
+} from "@/components/storyboard-editor"
 
 const DURATIONS = [
   { sec: 60, label: "1m" },
@@ -16,14 +21,15 @@ const TEMPLATES = [
   { value: "pitch_demo", label: "Pitch + demo" },
 ]
 
-// Selectable voices sent to the backend as the `voice` field. "default" lets
-// the backend fall back to the tone-based voice. The named voices resolve to
-// ElevenLabs voice IDs configured in backend/pipeline/voice_generator.py.
+// Selectable voices sent to the backend as the `voice` field. The backend
+// (backend/pipeline/voice_generator.py) only recognizes "male"/"female" (or
+// no value, which falls back to a tone-based default) — it does not use
+// ElevenLabs or named voices, so this list matches exactly what actually
+// changes the output.
 const VOICES = [
-  { value: "default", label: "Default" },
-  { value: "lamin", label: "Lamin" },
-  { value: "julius", label: "Julius" },
-  { value: "sinclair", label: "Sinclair" },
+  { value: "default", label: "Default (matches template)" },
+  { value: "female", label: "Female" },
+  { value: "male", label: "Male" },
 ]
 
 interface UrlInputFormProps {
@@ -40,10 +46,51 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
   const [loginOn, setLoginOn] = useState(false)
   const [loginUsername, setLoginUsername] = useState("")
   const [loginPassword, setLoginPassword] = useState("")
+  const [storyboardOn, setStoryboardOn] = useState(false)
+  const [storyboardBeats, setStoryboardBeats] = useState<StoryboardBeatDraft[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const disabled = loading || running
+
+  function toggleStoryboard() {
+    setStoryboardOn((v) => {
+      const next = !v
+      // Seed with one scene so toggling on isn't a blank, uninviting panel.
+      if (next && storyboardBeats.length === 0) {
+        setStoryboardBeats([emptyBeat()])
+      }
+      return next
+    })
+  }
+
+  // Only forward scenes/steps that actually have content — half-filled rows
+  // from a user who started then backed out shouldn't reach the backend.
+  function buildStoryboardPayload() {
+    if (!storyboardOn) return undefined
+    const beats = storyboardBeats
+      .map((beat) => {
+        const interaction_steps = beat.interaction_steps
+          .filter((s) => s.target.trim())
+          .map((s) => ({
+            action: s.action,
+            target: s.target.trim(),
+            value: s.value.trim() || undefined,
+            expected_result: s.expected_result.trim() || undefined,
+          }))
+        const seconds = beat.seconds.trim() ? Number(beat.seconds.trim()) : undefined
+        return {
+          route: beat.route.trim() || "/",
+          feature: beat.feature.trim() || undefined,
+          talking_point: beat.talking_point.trim() || undefined,
+          seconds: Number.isFinite(seconds) ? seconds : undefined,
+          interaction_steps,
+        }
+      })
+      // Drop fully-empty scenes (no talking point and no steps beyond the default "/").
+      .filter((b) => b.talking_point || b.interaction_steps.length > 0 || b.route !== "/")
+    return beats.length > 0 ? beats : undefined
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -65,6 +112,7 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
               loginOn && loginUsername && loginPassword
                 ? { username: loginUsername, password: loginPassword }
                 : undefined,
+            storyboard: buildStoryboardPayload(),
           },
         }),
       })
@@ -91,6 +139,8 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
     setLoginOn(false)
     setLoginUsername("")
     setLoginPassword("")
+    setStoryboardOn(false)
+    setStoryboardBeats([])
     setError(null)
   }
 
@@ -157,6 +207,23 @@ export function UrlInputForm({ onStarted, running }: UrlInputFormProps) {
             <SelectShell disabled>1080p Full HD</SelectShell>
           </div>
         </div>
+      </Card>
+
+      {/* Storyboard: let the developer script exact clicks/expectations */}
+      <Card
+        title="Storyboard"
+        subtitle="By default the AI explores your repo and improvises what to show. Script it yourself for full control over what's clicked, typed, and said."
+      >
+        <ToggleRow
+          title="Script this demo myself"
+          subtitle="Tell the AI exactly which page to be on, what to click or type, and what should happen — it will follow your scenes instead of guessing."
+          checked={storyboardOn}
+          onChange={toggleStoryboard}
+          disabled={disabled}
+        />
+        {storyboardOn ? (
+          <StoryboardEditor beats={storyboardBeats} onChange={setStoryboardBeats} disabled={disabled} />
+        ) : null}
       </Card>
 
       {/* Voiceover & style */}
