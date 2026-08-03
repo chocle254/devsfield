@@ -48,10 +48,10 @@ def _can_reuse_assembly(assembly: object, requested_duration: float,
         return False
 
     clips = assembly.get("segment_clips")
-    if (not math.isfinite(checkpoint_target) or not math.isfinite(actual_duration) or
+    if (not math.isfinite(checkpoint_target) or
             abs(checkpoint_target - float(requested_duration)) > 0.01 or
-            abs(actual_duration - float(requested_duration)) >
-            video_assembler.duration_tolerance(float(requested_duration)) or
+            not video_assembler.duration_within_budget(
+                actual_duration, float(requested_duration)) or
             not isinstance(clips, list) or len(clips) != len(voiced_segments) or
             voiced_count != len(voiced_segments)):
         return False
