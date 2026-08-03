@@ -63,6 +63,30 @@ def duration_tolerance(target_duration: float) -> float:
     # that an incomplete render is never presented as a full one.
     return max(1.0, min(3.0, float(target_duration) * 0.01))
 
+
+# A shorter-than-requested video is fine — the narration just finished
+# early and nothing was force-stretched to fill the gap. An OVER-length
+# video is capped, since letting the overshoot grow unbounded is its own
+# problem; this is the max amount past the requested duration we'll accept
+# before refusing to publish.
+MAX_OVERSHOOT_SECONDS = 40.0
+
+
+def duration_within_budget(actual_duration: float, target_duration: float) -> bool:
+    """Asymmetric check: any shortfall is fine; overshoot is capped.
+
+    Finishing under the requested duration is always acceptable — the video
+    simply didn't need the full runtime. Finishing over is only acceptable
+    up to MAX_OVERSHOOT_SECONDS past the target; beyond that we refuse to
+    publish rather than let the video run away in length.
+    """
+    if not math.isfinite(actual_duration):
+        return False
+    target = float(target_duration)
+    if actual_duration <= target:
+        return True
+    return (actual_duration - target) <= MAX_OVERSHOOT_SECONDS
+
 # Scale to fit inside the frame, then pad to exact WxH so mismatched source
 # resolutions never letterbox weirdly or shrink the final video.
 _SCALE_PAD = (
@@ -315,23 +339,15 @@ async def assemble(
             pass
 
     # Recording normally reserves three seconds for the title card. If that
-    # optional render is unavailable, preserve the selected duration by
-    # holding the final visible product state for the missing title time.
+    # optional render failed/was skipped, hold the final visible product
+    # state for just the missing title-card time so the video doesn't come
+    # up short by exactly the card it didn't get. This is NOT meant to force
+    # the whole video to an exact target duration — the narration's natural
+    # length owns that; we only ever patch the title-card gap here.
     final_visual_extension = 0.0
-    if target_duration is not None and voiced_segments:
-        timed_durations = []
-        for timed_segment in voiced_segments:
-            start = timed_segment.get("start_time")
-            end = timed_segment.get("end_time")
-            if start is None or end is None:
-                timed_durations = []
-                break
-            timed_durations.append(max(0.5, float(end) - float(start)))
-        if timed_durations:
-            final_visual_extension = max(
-                0.0,
-                float(target_duration) - title_duration - sum(timed_durations),
-            )
+    if target_duration is not None and title_card_path and title_duration == 0.0:
+        # A title card was requested but its render failed/was skipped above.
+        final_visual_extension = TITLE_CARD_SECONDS
 
     for seg_index, seg in enumerate(voiced_segments):
         seg_id = seg["segment_id"]
@@ -396,13 +412,11 @@ async def assemble(
     await concat_segments(concat_entries, final_video_path, job_id)
     actual_duration = await get_duration(final_video_path)
     if target_duration is not None:
-        if (not math.isfinite(actual_duration) or
-                abs(actual_duration - float(target_duration)) >
-                duration_tolerance(float(target_duration))):
+        if not duration_within_budget(actual_duration, float(target_duration)):
             raise RuntimeError(
                 f"Final video duration is {actual_duration:.1f}s; requested "
-                f"{float(target_duration):.1f}s. Refusing to publish an "
-                "incomplete demo.")
+                f"{float(target_duration):.1f}s (max overshoot is "
+                f"{MAX_OVERSHOOT_SECONDS:.0f}s). Refusing to publish.")
 
     return {
         "final_video_path": final_video_path,
