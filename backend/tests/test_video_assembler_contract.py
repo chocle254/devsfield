@@ -139,12 +139,16 @@ class VideoAssemblerDurationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["actual_duration_seconds"], 180.0)
         self.assertEqual(result["voiced_segment_count"], 3)
 
-    async def test_missing_title_holds_final_screen_state_to_selected_duration(self):
+    async def test_shorter_than_target_is_not_force_padded(self):
+        # No title card requested (title_card_path=None), so nothing should
+        # compensate for it — the video is allowed to finish naturally short
+        # of the requested duration instead of stretching the last segment's
+        # narration to fill the gap.
         durations = {
             "voice1.mp3": 59.0,
             "voice2.mp3": 59.0,
             "voice3.mp3": 59.0,
-            "/tmp/final_job.mp4": 180.0,
+            "/tmp/final_job.mp4": 177.0,
         }
         merge_targets = []
 
@@ -184,12 +188,147 @@ class VideoAssemblerDurationTests(unittest.IsolatedAsyncioTestCase):
                 target_duration=180.0,
             )
 
-        self.assertEqual(merge_targets, [59.0, 59.0, 62.0])
-        self.assertEqual(result["actual_duration_seconds"], 180.0)
+        # No forced stretch — every segment keeps its natural screen time.
+        self.assertEqual(merge_targets, [59.0, 59.0, 59.0])
+        self.assertEqual(result["actual_duration_seconds"], 177.0)
         self.assertEqual(
             result["assembly_contract_version"],
             video_assembler.ASSEMBLY_CONTRACT_VERSION,
         )
+
+    async def test_missing_title_card_only_compensates_for_the_card_itself(self):
+        # A title card WAS requested (title_card_path given) but its render
+        # is patched to fail, so title_duration stays 0. Only the 3s title
+        # gap should be added to the last segment — not the entire shortfall
+        # down to the target duration.
+        durations = {
+            "voice1.mp3": 59.0,
+            "voice2.mp3": 59.0,
+            "voice3.mp3": 59.0,
+            "/tmp/final_job.mp4": 180.0,
+        }
+        merge_targets = []
+
+        async def duration(path):
+            return durations.get(path, 59.0)
+
+        async def split_clip(*args):
+            return args[-1]
+
+        async def fit_video(*args):
+            return args[-1]
+
+        async def merge_segment(*args):
+            merge_targets.append(args[3])
+            return args[2]
+
+        async def concat_segments(*args):
+            return args[1]
+
+        async def failing_title_card(*args):
+            raise RuntimeError("title render failed")
+
+        with (
+            patch.object(video_assembler, "get_duration", duration),
+            patch.object(video_assembler, "split_clip", split_clip),
+            patch.object(video_assembler, "fit_video_to_duration", fit_video),
+            patch.object(video_assembler, "_merge_segment", merge_segment),
+            patch.object(video_assembler, "concat_segments", concat_segments),
+            patch.object(video_assembler, "_render_title_card", failing_title_card),
+            patch.object(video_assembler.os.path, "exists", lambda path: path.endswith(".mp3") or path == "title.png"),
+        ):
+            result = await video_assembler.assemble(
+                "recording.mp4",
+                [
+                    {"segment_id": 1, "start_time": 0, "end_time": 59, "audio_path": "voice1.mp3"},
+                    {"segment_id": 2, "start_time": 59, "end_time": 118, "audio_path": "voice2.mp3"},
+                    {"segment_id": 3, "start_time": 118, "end_time": 177, "audio_path": "voice3.mp3"},
+                ],
+                "title.png",
+                "job",
+                target_duration=180.0,
+            )
+
+        # Only the 3s title-card gap is patched onto the last segment.
+        self.assertEqual(merge_targets, [59.0, 59.0, 62.0])
+        self.assertEqual(result["actual_duration_seconds"], 180.0)
+
+    async def test_assemble_accepts_overshoot_within_budget(self):
+        durations = {
+            "voice1.mp3": 60.0,
+            "/tmp/final_job.mp4": 200.0,  # 20s over a 180s target — within the 40s cap
+        }
+
+        async def duration(path):
+            return durations.get(path, 60.0)
+
+        async def split_clip(*args):
+            return args[-1]
+
+        async def fit_video(*args):
+            return args[-1]
+
+        async def merge_segment(*args):
+            return args[2]
+
+        async def concat_segments(*args):
+            return args[1]
+
+        with (
+            patch.object(video_assembler, "get_duration", duration),
+            patch.object(video_assembler, "split_clip", split_clip),
+            patch.object(video_assembler, "fit_video_to_duration", fit_video),
+            patch.object(video_assembler, "_merge_segment", merge_segment),
+            patch.object(video_assembler, "concat_segments", concat_segments),
+            patch.object(video_assembler.os.path, "exists", lambda path: path.endswith(".mp3")),
+        ):
+            result = await video_assembler.assemble(
+                "recording.mp4",
+                [{"segment_id": 1, "start_time": 0, "end_time": 60, "audio_path": "voice1.mp3"}],
+                None,
+                "job",
+                target_duration=180.0,
+            )
+
+        self.assertEqual(result["actual_duration_seconds"], 200.0)
+
+    async def test_assemble_rejects_overshoot_past_budget(self):
+        durations = {
+            "voice1.mp3": 60.0,
+            "/tmp/final_job.mp4": 230.0,  # 50s over a 180s target — past the 40s cap
+        }
+
+        async def duration(path):
+            return durations.get(path, 60.0)
+
+        async def split_clip(*args):
+            return args[-1]
+
+        async def fit_video(*args):
+            return args[-1]
+
+        async def merge_segment(*args):
+            return args[2]
+
+        async def concat_segments(*args):
+            return args[1]
+
+        with (
+            patch.object(video_assembler, "get_duration", duration),
+            patch.object(video_assembler, "split_clip", split_clip),
+            patch.object(video_assembler, "fit_video_to_duration", fit_video),
+            patch.object(video_assembler, "_merge_segment", merge_segment),
+            patch.object(video_assembler, "concat_segments", concat_segments),
+            patch.object(video_assembler.os.path, "exists", lambda path: path.endswith(".mp3")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Refusing to publish"):
+                await video_assembler.assemble(
+                    "recording.mp4",
+                    [{"segment_id": 1, "start_time": 0, "end_time": 60, "audio_path": "voice1.mp3"}],
+                    None,
+                    "job",
+                    target_duration=180.0,
+                )
 
 
 if __name__ == "__main__":
