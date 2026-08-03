@@ -174,6 +174,41 @@ No markdown. No explanation."""
         return {}
 
 
+# Shared by write_segmented_script (first draft) and resize_segment_text
+# (post-TTS duration-fit retry) so both describe the narrator the same way.
+_TONE_PERSONAS = {
+    "pitch": "confident founder walking an investor through their product",
+    "pitch_demo": "confident founder: quick pitch energy, then a hands-on walkthrough",
+    "demo": "friendly teammate showing a colleague how the product works",
+    "technical": "senior engineer explaining the interesting parts to another developer",
+}
+
+
+async def resize_segment_text(text: str, target_words: int, repo_name: str,
+                              tone: str, feature: str, gmi_api_key: str) -> str:
+    """Rewrite one already-written narration line to a new word target.
+
+    Called by voice_generator after TTS reveals the voice's real speaking
+    rate: if a segment's synthesized clip comes out shorter or longer than
+    its planned on-screen time, the fixed 2.4 words/second planning estimate
+    (WORDS_PER_SECOND) was wrong for that voice, not the text itself. The
+    caller recomputes target_words from the *measured* rate and calls this
+    to get a same-meaning line sized for it.
+
+    Reuses the same one-line repair call and deterministic pad/trim fallback
+    as the initial script draft, so this can never hang or block on a flaky
+    LLM call — a retry needs to resolve quickly or fall through.
+    """
+    persona = _TONE_PERSONAS.get(tone, "clear, friendly product presenter")
+    repaired = await _repair_segments(
+        [{"segment_id": 0, "text": text, "target_words": target_words}],
+        {"repo_name": repo_name}, persona, gmi_api_key)
+    candidate = repaired.get(0, "")
+    if candidate and not _needs_length_repair(candidate, target_words):
+        return candidate
+    return _pad_or_trim(candidate or text, target_words, feature)
+
+
 def _target_words(segment: dict) -> int:
     """Fit the word budget to the segment's actual recorded duration."""
     start = segment.get("start_time")
@@ -299,13 +334,7 @@ async def write_segmented_script(context: dict, segments: list[dict],
     Returns the same list of segments, each with an added "text" field —
     the narration line for that specific segment.
     """
-    tone_descriptions = {
-        "pitch": "confident founder walking an investor through their product",
-        "pitch_demo": "confident founder: quick pitch energy, then a hands-on walkthrough",
-        "demo": "friendly teammate showing a colleague how the product works",
-        "technical": "senior engineer explaining the interesting parts to another developer",
-    }
-    persona = tone_descriptions.get(tone, "clear, friendly product presenter")
+    persona = _TONE_PERSONAS.get(tone, "clear, friendly product presenter")
 
     segments_for_llm = []
     for seg in segments:
