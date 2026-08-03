@@ -22,6 +22,30 @@ from genblaze_gmicloud import GMICloudAudioProvider
 
 from .segment_tool import get_duration
 
+# --- Workaround for a genblaze-gmicloud payload bug (as of 0.3.5) ----------
+# GMICloud's own request-queue API requires the narration text to be sent
+# under the key "text". genblaze-gmicloud's audio TTS ModelFamily only
+# aliases voice->voice_id and leaves the universal "prompt" key untouched,
+# so every submit ships {"prompt": "..."} and GMICloud rejects it with
+# "invalid payload parameters: text (Required parameter is missing)" for
+# every model in _CANDIDATES below (that's why the fallback chain didn't
+# help — the same bug hits all three). genblaze-elevenlabs's own provider
+# already does this same prompt->text rename internally, so this patches
+# gmicloud's provider to match that established convention. Safe to delete
+# once a genblaze-gmicloud release adds the alias upstream.
+_orig_prepare_payload = GMICloudAudioProvider.prepare_payload
+
+
+def _prepare_payload_with_text(self, step, **kwargs):
+    payload = _orig_prepare_payload(self, step, **kwargs)
+    if step.modality == Modality.AUDIO and "text" not in payload and "prompt" in payload:
+        payload["text"] = payload.pop("prompt")
+    return payload
+
+
+GMICloudAudioProvider.prepare_payload = _prepare_payload_with_text
+# ---------------------------------------------------------------------------
+
 MAX_CONCURRENT = 1
 
 # Per-segment generation timeout. GMI audio runs through a request queue, so it
