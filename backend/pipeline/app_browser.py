@@ -1449,7 +1449,14 @@ async def _perform_action(page, decision: dict, controls: list[dict]) -> dict:
                 try:
                     text_locator = page.get_by_text(scroll_target, exact=False).first
                     if await text_locator.count() > 0:
-                        await text_locator.scroll_into_view_if_needed(timeout=3000)
+                        # Playwright's own scroll_into_view_if_needed() jumps
+                        # instantly (it's built for reliability, not visual
+                        # polish) — a smooth CSS scroll here keeps a targeted
+                        # scroll looking the same as the generic nudge below,
+                        # instead of a jarring jump-cut on camera.
+                        await text_locator.evaluate(
+                            "(el) => el.scrollIntoView({behavior: 'smooth', block: 'center'})"
+                        )
                         scrolled_to_target = True
                 except Exception:
                     # Text not found/visible (typo, dynamic content not yet
