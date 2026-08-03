@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import random
+import re
 
 import httpx
 
@@ -51,6 +52,127 @@ BANNED_PHRASES = [
     "user-friendly interface", "intuitive interface", "welcome to",
 ]
 
+# The ±20% instruction given to the model in the main prompt is a request,
+# not a guarantee — a batched JSON response covering every segment at once
+# can and does drift badly on one or two entries even when every other
+# segment lands fine. Left unchecked, that drift is only ever discovered
+# downstream at video_assembler's hard VOICE_DURATION_TOLERANCE (0.25) gate
+# — after TTS has already been generated for the mismatched segment, and
+# late enough to fail the whole job. This corridor is deliberately wider
+# than that hard gate (0.6-1.5x vs 0.75-1.25x) so ordinary, harmless
+# variance never triggers an unnecessary repair call; only genuine drift
+# that would actually fail downstream does.
+LENGTH_REPAIR_LOW = 0.6
+LENGTH_REPAIR_HIGH = 1.5
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _needs_length_repair(text: str, target_words: int) -> bool:
+    words = _word_count(text)
+    if words == 0:
+        return True
+    return not (LENGTH_REPAIR_LOW * target_words <= words <= LENGTH_REPAIR_HIGH * target_words)
+
+
+# A small rotation of generic, non-fabricating filler clauses for the
+# deterministic pad fallback. Only fires when BOTH the main script call
+# drifted on a segment AND the single-purpose repair call also failed (rare
+# — _call_gmi_chat already retries transient errors 3x with backoff before
+# giving up). Cycling through several clauses instead of one avoids visibly
+# repeating the same sentence back to back if more than one pad is needed;
+# none of them assert anything beyond what the segment already established.
+_PAD_TEMPLATES = (
+    " That's {feature} at work.",
+    " You can see it happening right on screen.",
+    " It's a small detail, but it matters.",
+    " Nothing complicated about it — it just works.",
+    " That's the kind of thing that adds up.",
+)
+
+
+def _pad_or_trim(text: str, target_words: int, feature: str) -> str:
+    """Deterministic last-resort fixer if even the repair LLM call fails.
+
+    Converges on target_words itself (the middle of the acceptable
+    corridor), not just its nearer edge — TTS speaking pace varies a bit
+    from the nominal 2.4 wps planning estimate, so landing at the edge of
+    "acceptable" risks tipping over it once real audio is generated.
+    """
+    words = _word_count(text)
+    if words > target_words:
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        kept, running = [], 0
+        for sentence in sentences:
+            kept.append(sentence)
+            running += _word_count(sentence)
+            if running >= target_words:
+                break
+        return " ".join(kept).strip() or text
+    if words < target_words:
+        pieces = [text.rstrip()]
+        total = words
+        i = 0
+        # Each template adds only a handful of words; cap iterations
+        # defensively so this can never spin — comfortably covers even a
+        # long ~90s segment (~216 target words) many times over.
+        while total < target_words and i < 40:
+            filler = _PAD_TEMPLATES[i % len(_PAD_TEMPLATES)].format(feature=feature or "this")
+            pieces.append(filler.strip())
+            total += _word_count(filler)
+            i += 1
+        return " ".join(pieces).strip()
+    return text
+
+
+async def _repair_segments(
+    to_repair: list[dict], context: dict, persona: str, gmi_api_key: str,
+) -> dict[int, str]:
+    """One follow-up call covering every under/over-length segment at once
+    — cheaper and faster than a call per segment, and still small enough
+    that it doesn't meaningfully add to the job's time budget."""
+    prompt = f"""You already wrote a demo voice-over script for {context['repo_name']}, \
+speaking as: a {persona}. The following lines didn't fit their segment's \
+timing — rewrite ONLY these lines to hit their target_words (±10%), same \
+meaning, same spoken, contraction-heavy style, no banned phrases: \
+{json.dumps(BANNED_PHRASES)}.
+
+{json.dumps(to_repair, indent=2)}
+
+Return ONLY a valid JSON array: [{{"segment_id": 1, "text": "rewritten line"}}]
+No markdown. No explanation."""
+
+    payload = {
+        "model": SCRIPT_MODEL,
+        "messages": [
+            {"role": "system", "content":
+             "You write voice-over scripts that sound like a real "
+             "person talking, never like AI marketing copy. "
+             "Respond ONLY with valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 800,
+    }
+    try:
+        response = await _call_gmi_chat(payload, gmi_api_key)
+        if response.status_code != 200:
+            return {}
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(content)
+        if not isinstance(parsed, list):
+            return {}
+        return {
+            int(item["segment_id"]): str(item["text"]).strip()
+            for item in parsed if item.get("text")
+        }
+    except Exception:  # noqa: BLE001 - any failure here just falls through to _pad_or_trim
+        logger.warning("[script] length-repair call failed; using deterministic pad/trim.")
+        return {}
+
 
 def _target_words(segment: dict) -> int:
     """Fit the word budget to the segment's actual recorded duration."""
@@ -69,13 +191,15 @@ def _target_words(segment: dict) -> int:
 
 
 def _fallback(segments: list[dict], repo_name: str) -> list[dict]:
-    return [
-        {**seg,
-         "text": seg.get("talking_point")
-                 or f"Here's a look at {repo_name} in action.",
-         "screen_note": seg.get("feature", seg.get("action", ""))}
-        for seg in segments
-    ]
+    result = []
+    for seg in segments:
+        text = seg.get("talking_point") or f"Here's a look at {repo_name} in action."
+        result.append({
+            **seg,
+            "text": _pad_or_trim(text, _target_words(seg), seg.get("feature", "")),
+            "screen_note": seg.get("feature", seg.get("action", "")),
+        })
+    return result
 
 
 def _is_transient_gmi_error(status_code: int, body_text: str) -> bool:
@@ -278,6 +402,7 @@ No markdown. No explanation."""
         parsed = json.loads(content)
         if isinstance(parsed, list) and len(parsed) > 0:
             by_id = {p["segment_id"]: p for p in parsed}
+            target_words_by_id = {s["segment_id"]: s["target_words"] for s in segments_for_llm}
             result = []
             for seg in segments:
                 match = by_id.get(seg["segment_id"], {})
@@ -291,6 +416,38 @@ No markdown. No explanation."""
                     "screen_note": match.get("screen_note",
                                              seg.get("feature", seg.get("action", ""))),
                 })
+
+            # Catch any segment the model drifted badly on now, while it's
+            # still cheap to fix — not at the hard publish-time gate after
+            # TTS has already been generated for it.
+            needs_repair = [
+                seg for seg in result
+                if _needs_length_repair(seg["text"], target_words_by_id.get(seg["segment_id"], 20))
+            ]
+            if needs_repair:
+                logger.info(
+                    "[script] %d segment(s) missed their target length; "
+                    "repairing before voice generation.", len(needs_repair))
+                repair_payload = [
+                    {"segment_id": seg["segment_id"], "text": seg["text"],
+                     "target_words": target_words_by_id.get(seg["segment_id"], 20)}
+                    for seg in needs_repair
+                ]
+                repaired = await _repair_segments(repair_payload, context, persona, gmi_api_key)
+                by_result_id = {seg["segment_id"]: seg for seg in result}
+                for seg in needs_repair:
+                    seg_id = seg["segment_id"]
+                    target = target_words_by_id.get(seg_id, 20)
+                    candidate = repaired.get(seg_id, "")
+                    if candidate and not _needs_length_repair(candidate, target):
+                        by_result_id[seg_id]["text"] = candidate
+                    else:
+                        # Repair call unavailable, failed, or still off —
+                        # guarantee a fit deterministically rather than
+                        # letting this reach video_assembler's hard gate.
+                        by_result_id[seg_id]["text"] = _pad_or_trim(
+                            candidate or seg["text"], target, seg.get("feature", ""))
+
             return result
     except json.JSONDecodeError:
         pass
